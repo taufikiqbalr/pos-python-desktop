@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.db
+*.sqlite3
+.venv/
+venv/
+.env
+.idea/
+.vscode/
+.DS_Store
+receipts/*.txt
+!receipts/.gitkeep
