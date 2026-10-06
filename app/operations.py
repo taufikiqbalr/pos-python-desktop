@@ -11,6 +11,64 @@ def _money(value: Decimal) -> int:
     return int(value.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+def _expected_drawer_cash(conn, shift_id: int) -> int:
+    shift = conn.execute(
+        "SELECT opening_cash FROM shifts WHERE id=?",
+        (shift_id,),
+    ).fetchone()
+    if not shift:
+        raise ValueError("Shift tidak ditemukan")
+
+    cash_received = conn.execute(
+        """
+        SELECT COALESCE(SUM(sp.amount), 0)
+        FROM sale_payments sp
+        JOIN sales s ON s.id=sp.sale_id
+        WHERE s.shift_id=? AND s.status='COMPLETED' AND sp.method='Tunai'
+        """,
+        (shift_id,),
+    ).fetchone()[0]
+    cash_change = conn.execute(
+        """
+        SELECT COALESCE(SUM(s.change_amount), 0)
+        FROM sales s
+        WHERE s.shift_id=? AND s.status='COMPLETED'
+          AND EXISTS (
+              SELECT 1 FROM sale_payments sp
+              WHERE sp.sale_id=s.id AND sp.method='Tunai'
+          )
+        """,
+        (shift_id,),
+    ).fetchone()[0]
+    cash_refund = conn.execute(
+        """
+        SELECT COALESCE(SUM(total_amount), 0)
+        FROM refunds
+        WHERE shift_id=? AND refund_method='Tunai'
+        """,
+        (shift_id,),
+    ).fetchone()[0]
+    movements = conn.execute(
+        """
+        SELECT
+            COALESCE(SUM(CASE WHEN movement_type='IN' THEN amount ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN movement_type='OUT' THEN amount ELSE 0 END), 0)
+        FROM cash_movements
+        WHERE shift_id=?
+        """,
+        (shift_id,),
+    ).fetchone()
+
+    return int(
+        shift["opening_cash"]
+        + cash_received
+        - cash_change
+        - cash_refund
+        + movements[0]
+        - movements[1]
+    )
+
+
 class CustomerService:
     """Local development adapter for member/customer lookup.
 
@@ -86,6 +144,14 @@ class CashMovementService:
             ).fetchone()
             if not shift:
                 raise ValueError("Shift kasir tidak aktif")
+
+            if movement_type == "OUT":
+                available_cash = _expected_drawer_cash(conn, shift_id)
+                if amount > available_cash:
+                    raise ValueError(
+                        "Cash out melebihi kas yang tersedia di laci "
+                        f"({available_cash})"
+                    )
 
             cur = conn.execute(
                 """
@@ -418,6 +484,12 @@ class RefundService:
                 ).fetchone()
                 if not shift:
                     raise ValueError("Shift kasir tidak aktif untuk refund tunai")
+                available_cash = _expected_drawer_cash(conn, shift_id)
+                if total_amount > available_cash:
+                    raise ValueError(
+                        "Refund tunai melebihi kas yang tersedia di laci "
+                        f"({available_cash})"
+                    )
 
             refund_no = self._new_code(conn)
             cur = conn.execute(
