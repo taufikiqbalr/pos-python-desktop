@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from app.config import TAX_PERCENT, format_rupiah
 from app.domain import Cart, Product
+from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import (
     AuthService,
     CatalogService,
@@ -40,6 +41,11 @@ from app.ui.dialogs import (
     ProductSearchDialog,
     ReceiptDialog,
 )
+from app.ui.operations_dialogs import (
+    CashMovementDialog,
+    CustomerSearchDialog,
+    RefundDialog,
+)
 
 
 class PosWindow(QMainWindow):
@@ -51,6 +57,10 @@ class PosWindow(QMainWindow):
         catalog_service: CatalogService,
         sale_service: SaleService,
         shift_service: ShiftService,
+        customer_service: CustomerService,
+        cash_movement_service: CashMovementService,
+        refund_service: RefundService,
+        audit_service: AuditService,
         receipt_service: ReceiptService,
         on_logout,
     ) -> None:
@@ -60,9 +70,14 @@ class PosWindow(QMainWindow):
         self.catalog_service = catalog_service
         self.sale_service = sale_service
         self.shift_service = shift_service
+        self.customer_service = customer_service
+        self.cash_movement_service = cash_movement_service
+        self.refund_service = refund_service
+        self.audit_service = audit_service
         self.receipt_service = receipt_service
         self.on_logout = on_logout
         self.cart = Cart(tax_percent=TAX_PERCENT)
+        self.selected_customer: dict | None = None
         self.active_shift = self.shift_service.get_open_shift(self.user["id"])
 
         self.setWindowTitle("Koperasi BRIN POS")
@@ -88,6 +103,8 @@ class PosWindow(QMainWindow):
         self.shift_label.setObjectName("Subtitle")
         self.shift_button = QPushButton()
         history_button = QPushButton("Riwayat (F8)")
+        cash_button = QPushButton("Kas (F10)")
+        refund_button = QPushButton("Refund (F11)")
         new_button = QPushButton("Transaksi Baru (F6)")
         logout_button = QPushButton("Logout")
         header.addWidget(title)
@@ -97,6 +114,8 @@ class PosWindow(QMainWindow):
         header.addWidget(self.shift_label)
         header.addWidget(self.shift_button)
         header.addWidget(history_button)
+        header.addWidget(cash_button)
+        header.addWidget(refund_button)
         header.addWidget(new_button)
         header.addWidget(logout_button)
         root_layout.addLayout(header)
@@ -153,9 +172,16 @@ class PosWindow(QMainWindow):
         right_layout.setContentsMargins(22, 20, 22, 20)
         right_layout.addWidget(QLabel("Ringkasan Transaksi"))
 
+        customer_row = QHBoxLayout()
         self.customer_input = QLineEdit()
-        self.customer_input.setPlaceholderText("Nama / no. anggota pelanggan (opsional)")
-        right_layout.addWidget(self.customer_input)
+        self.customer_input.setPlaceholderText("Nama pelanggan (opsional)")
+        member_button = QPushButton("Cari Anggota")
+        customer_row.addWidget(self.customer_input, 1)
+        customer_row.addWidget(member_button)
+        right_layout.addLayout(customer_row)
+        self.member_label = QLabel("Pelanggan umum")
+        self.member_label.setObjectName("Subtitle")
+        right_layout.addWidget(self.member_label)
 
         discount_row = QHBoxLayout()
         discount_row.addWidget(QLabel("Diskon transaksi (%)"))
@@ -202,7 +228,7 @@ class PosWindow(QMainWindow):
         body.addWidget(right, 1)
 
         self.statusBar().showMessage(
-            "F2 Scan • F3 Cari • F4 Bayar • F5 Hold • F6 Baru • F7 Daftar Hold • F8 Riwayat • F9 Shift"
+            "F2 Scan • F3 Cari • F4 Bayar • F5 Hold • F6 Baru • F7 Hold • F8 Riwayat • F9 Shift • F10 Kas • F11 Refund"
         )
 
         self.scan_input.returnPressed.connect(self.scan_code)
@@ -217,6 +243,9 @@ class PosWindow(QMainWindow):
         self.pay_button.clicked.connect(self.checkout)
         new_button.clicked.connect(self.new_sale)
         history_button.clicked.connect(self.open_history)
+        cash_button.clicked.connect(self.open_cash_movement)
+        refund_button.clicked.connect(self.open_refund)
+        member_button.clicked.connect(self.search_customer)
         self.shift_button.clicked.connect(self.manage_shift)
         logout_button.clicked.connect(self.logout)
 
@@ -230,6 +259,8 @@ class PosWindow(QMainWindow):
             ("F7", self.open_held_sales),
             ("F8", self.open_history),
             ("F9", self.manage_shift),
+            ("F10", self.open_cash_movement),
+            ("F11", self.open_refund),
         ]
         self._shortcuts = []
         for key, handler in shortcuts:
@@ -307,6 +338,67 @@ class PosWindow(QMainWindow):
             f"Selisih: {format_rupiah(result['cash_difference'])}",
         )
         self.refresh_shift_state()
+
+    def search_customer(self) -> None:
+        dialog = CustomerSearchDialog(self.customer_service, self)
+        if not dialog.exec() or not dialog.selected_customer:
+            return
+        self.selected_customer = dialog.selected_customer
+        self.customer_input.setText(self.selected_customer["name"])
+        self.customer_input.setReadOnly(True)
+        self.member_label.setText(
+            f"Anggota {self.selected_customer.get('member_no') or '-'} • "
+            f"{self.selected_customer.get('membership_type') or 'MEMBER'}"
+        )
+
+    def clear_customer(self) -> None:
+        self.selected_customer = None
+        self.customer_input.setReadOnly(False)
+        self.customer_input.clear()
+        self.member_label.setText("Pelanggan umum")
+
+    def open_cash_movement(self) -> None:
+        self.refresh_shift_state()
+        if not self.active_shift:
+            QMessageBox.information(
+                self,
+                "Shift Belum Dibuka",
+                "Cash-in/cash-out hanya dapat dicatat pada shift aktif.",
+            )
+            return
+        dialog = CashMovementDialog(
+            shift_id=self.active_shift["id"],
+            cashier_user_id=self.user["id"],
+            auth_service=self.auth_service,
+            movement_service=self.cash_movement_service,
+            parent=self,
+        )
+        if dialog.exec() and dialog.result_movement:
+            movement = dialog.result_movement
+            label = "Cash In" if movement["movement_type"] == "IN" else "Cash Out"
+            QMessageBox.information(
+                self,
+                "Pergerakan Kas Tercatat",
+                f"{label} {format_rupiah(movement['amount'])} berhasil dicatat.",
+            )
+
+    def open_refund(self) -> None:
+        self.refresh_shift_state()
+        dialog = RefundDialog(
+            refund_service=self.refund_service,
+            auth_service=self.auth_service,
+            cashier_user_id=self.user["id"],
+            shift_id=self.active_shift["id"] if self.active_shift else None,
+            parent=self,
+        )
+        if dialog.exec() and dialog.refund_result:
+            refund = dialog.refund_result
+            QMessageBox.information(
+                self,
+                "Refund Berhasil",
+                f"{refund['refund_no']} berhasil diproses sebesar "
+                f"{format_rupiah(refund['total_amount'])}.",
+            )
 
     def focus_scan(self) -> None:
         self.scan_input.setFocus()
@@ -448,6 +540,10 @@ class PosWindow(QMainWindow):
                 cart=self.cart,
                 cashier_user_id=self.user["id"],
                 customer_name=self.customer_input.text(),
+                customer_id=self.selected_customer["id"] if self.selected_customer else None,
+                customer_member_no=(
+                    self.selected_customer.get("member_no") if self.selected_customer else None
+                ),
                 notes=self.notes_input.toPlainText(),
             )
         except ValueError as exc:
@@ -493,12 +589,32 @@ class PosWindow(QMainWindow):
             return
 
         self.cart = restored_cart
-        self.customer_input.setText(held.get("customer_name") or "")
+        held_customer_id = held.get("customer_id")
+        self.selected_customer = (
+            self.customer_service.get(int(held_customer_id))
+            if held_customer_id is not None
+            else None
+        )
+        if self.selected_customer:
+            self.customer_input.setReadOnly(True)
+            self.customer_input.setText(self.selected_customer["name"])
+            self.member_label.setText(
+                f"Anggota {self.selected_customer.get('member_no') or '-'} • "
+                f"{self.selected_customer.get('membership_type') or 'MEMBER'}"
+            )
+        else:
+            self.customer_input.setReadOnly(False)
+            self.customer_input.setText(held.get("customer_name") or "")
+            self.member_label.setText("Pelanggan umum")
         self.notes_input.setPlainText(held.get("notes") or "")
         self.discount_spin.blockSignals(True)
         self.discount_spin.setValue(float(self.cart.cart_discount_percent))
         self.discount_spin.blockSignals(False)
-        self.sale_service.delete_held(dialog.selected_hold_no, self.user["id"])
+        self.sale_service.delete_held(
+            dialog.selected_hold_no,
+            self.user["id"],
+            audit_action="HOLD_RESUMED",
+        )
         self.refresh_cart()
         self.focus_scan()
 
@@ -533,6 +649,10 @@ class PosWindow(QMainWindow):
                 cart=self.cart,
                 cashier_user_id=self.user["id"],
                 customer_name=self.customer_input.text(),
+                customer_id=self.selected_customer["id"] if self.selected_customer else None,
+                customer_member_no=(
+                    self.selected_customer.get("member_no") if self.selected_customer else None
+                ),
                 payments=dialog.payments,
                 shift_id=self.active_shift["id"],
                 notes=self.notes_input.toPlainText(),
@@ -552,7 +672,7 @@ class PosWindow(QMainWindow):
 
     def reset_form(self) -> None:
         self.cart.clear()
-        self.customer_input.clear()
+        self.clear_customer()
         self.notes_input.clear()
         self.discount_spin.blockSignals(True)
         self.discount_spin.setValue(0)
