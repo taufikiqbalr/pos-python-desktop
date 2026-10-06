@@ -1,0 +1,122 @@
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from app.config import DATABASE_PATH
+from app.security import hash_password
+
+
+class Database:
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path or DATABASE_PATH)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
+    def initialize(self) -> None:
+        with self.connect() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    full_name TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'cashier',
+                    password_hash TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE TABLE IF NOT EXISTS products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sku TEXT NOT NULL UNIQUE,
+                    barcode TEXT NOT NULL UNIQUE,
+                    name TEXT NOT NULL,
+                    unit TEXT NOT NULL DEFAULT 'pcs',
+                    price INTEGER NOT NULL CHECK(price >= 0),
+                    stock REAL NOT NULL DEFAULT 0 CHECK(stock >= 0),
+                    active INTEGER NOT NULL DEFAULT 1,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);
+                CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
+                CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
+
+                CREATE TABLE IF NOT EXISTS sales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    invoice_no TEXT NOT NULL UNIQUE,
+                    cashier_user_id INTEGER NOT NULL,
+                    customer_name TEXT,
+                    subtotal INTEGER NOT NULL,
+                    discount_total INTEGER NOT NULL DEFAULT 0,
+                    tax_total INTEGER NOT NULL DEFAULT 0,
+                    grand_total INTEGER NOT NULL,
+                    payment_method TEXT NOT NULL,
+                    paid_amount INTEGER NOT NULL,
+                    change_amount INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS sale_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sale_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    sku TEXT NOT NULL,
+                    product_name TEXT NOT NULL,
+                    qty INTEGER NOT NULL CHECK(qty > 0),
+                    unit_price INTEGER NOT NULL,
+                    discount_amount INTEGER NOT NULL DEFAULT 0,
+                    line_total INTEGER NOT NULL,
+                    FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE CASCADE,
+                    FOREIGN KEY(product_id) REFERENCES products(id)
+                );
+                """
+            )
+            self._seed_users(conn)
+            self._seed_products(conn)
+
+    @staticmethod
+    def _seed_users(conn: sqlite3.Connection) -> None:
+        existing = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if existing:
+            return
+        conn.executemany(
+            "INSERT INTO users(username, full_name, role, password_hash) VALUES (?, ?, ?, ?)",
+            [
+                ("kasir", "Kasir Demo", "cashier", hash_password("kasir123")),
+                ("supervisor", "Supervisor Demo", "supervisor", hash_password("supervisor123")),
+            ],
+        )
+
+    @staticmethod
+    def _seed_products(conn: sqlite3.Connection) -> None:
+        existing = conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        if existing:
+            return
+        products = [
+            ("BRIN-TS-001", "8997001000011", "Kaos BRIN Navy - M", "pcs", 95000, 25),
+            ("BRIN-TS-002", "8997001000028", "Kaos BRIN Navy - L", "pcs", 95000, 25),
+            ("BRIN-JK-001", "8997001000035", "Jaket BRIN", "pcs", 225000, 12),
+            ("BRIN-CP-001", "8997001000042", "Topi BRIN", "pcs", 75000, 18),
+            ("BRIN-MG-001", "8997001000059", "Mug BRIN", "pcs", 55000, 30),
+            ("BRIN-TB-001", "8997001000066", "Tumbler BRIN 500ml", "pcs", 125000, 20),
+            ("TOKO-AM-001", "8997002000010", "Air Mineral 600ml", "btl", 5000, 100),
+            ("TOKO-KP-001", "8997002000027", "Kopi Botol", "btl", 10000, 60),
+            ("TOKO-RT-001", "8997002000034", "Roti Cokelat", "pcs", 8500, 45),
+            ("TOKO-SN-001", "8997002000041", "Snack Kentang", "pcs", 12000, 50),
+            ("ATK-PEN-001", "8997003000019", "Pulpen Gel Hitam", "pcs", 6000, 80),
+            ("ATK-NB-001", "8997003000026", "Notebook A5", "pcs", 18000, 40),
+        ]
+        conn.executemany(
+            "INSERT INTO products(sku, barcode, name, unit, price, stock) VALUES (?, ?, ?, ?, ?, ?)",
+            products,
+        )
