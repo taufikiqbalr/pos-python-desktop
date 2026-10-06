@@ -313,39 +313,98 @@ class RefundService:
             raise ValueError("Metode refund wajib dipilih")
         if not reason:
             raise ValueError("Alasan return/refund wajib diisi")
-
-        preview = self.preview(invoice_no, selections)
+        if not selections:
+            raise ValueError("Pilih minimal satu item untuk diretur")
 
         with self.db.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             sale = conn.execute(
-                "SELECT id, status FROM sales WHERE id=?",
-                (preview["sale_id"],),
-            ).fetchone()
-            if not sale or sale["status"] == "VOIDED":
-                raise ValueError("Transaksi tidak dapat direfund")
-
-            # Re-read availability inside the write transaction to prevent double refund.
-            refreshed_rows = conn.execute(
                 """
-                SELECT si.id, si.qty,
-                       COALESCE(SUM(ri.qty), 0) AS refunded_qty
-                FROM sale_items si
-                LEFT JOIN refund_items ri ON ri.sale_item_id=si.id
-                WHERE si.sale_id=?
-                GROUP BY si.id
+                SELECT * FROM sales
+                WHERE invoice_no=?
                 """,
-                (preview["sale_id"],),
+                (invoice_no.strip(),),
+            ).fetchone()
+            if not sale:
+                raise ValueError("Invoice tidak ditemukan")
+            if sale["status"] == "VOIDED":
+                raise ValueError("Transaksi void tidak dapat direfund")
+
+            item_rows = conn.execute(
+                "SELECT * FROM sale_items WHERE sale_id=? ORDER BY id",
+                (sale["id"],),
             ).fetchall()
-            availability = {
-                int(row["id"]): int(row["qty"]) - int(row["refunded_qty"])
-                for row in refreshed_rows
+            items = [dict(row) for row in item_rows]
+            allocations = self._allocate_sale_total(items, int(sale["grand_total"]))
+
+            refunded_rows = conn.execute(
+                """
+                SELECT ri.sale_item_id,
+                       COALESCE(SUM(ri.qty), 0) AS refunded_qty,
+                       COALESCE(SUM(ri.amount), 0) AS refunded_amount
+                FROM refund_items ri
+                JOIN refunds r ON r.id=ri.refund_id
+                WHERE r.original_sale_id=?
+                GROUP BY ri.sale_item_id
+                """,
+                (sale["id"],),
+            ).fetchall()
+            refunded = {
+                int(row["sale_item_id"]): {
+                    "qty": int(row["refunded_qty"]),
+                    "amount": int(row["refunded_amount"]),
+                }
+                for row in refunded_rows
             }
-            for line in preview["lines"]:
-                if line["qty"] > availability.get(line["sale_item_id"], 0):
+
+            selected_lines = []
+            total_amount = 0
+            item_by_id = {int(item["id"]): item for item in items}
+            for sale_item_id_raw, qty_raw in selections.items():
+                sale_item_id = int(sale_item_id_raw)
+                qty = int(qty_raw)
+                if qty <= 0:
+                    continue
+                item = item_by_id.get(sale_item_id)
+                if not item:
+                    raise ValueError("Item refund tidak sesuai dengan invoice")
+
+                prior = refunded.get(sale_item_id, {"qty": 0, "amount": 0})
+                available_qty = int(item["qty"]) - prior["qty"]
+                if qty > available_qty:
                     raise ValueError(
-                        f"Qty refund {line['product_name']} sudah berubah. Muat ulang transaksi."
+                        f"Qty refund {item['product_name']} melebihi sisa yang dapat diretur"
                     )
+
+                new_returned_qty = prior["qty"] + qty
+                allocated_total = allocations[sale_item_id]
+                cumulative_entitlement = _money(
+                    Decimal(allocated_total)
+                    * Decimal(new_returned_qty)
+                    / Decimal(int(item["qty"]))
+                )
+                amount = max(0, cumulative_entitlement - prior["amount"])
+                if amount <= 0:
+                    raise ValueError(
+                        f"Nilai refund {item['product_name']} tidak valid"
+                    )
+
+                selected_lines.append(
+                    {
+                        "sale_item_id": sale_item_id,
+                        "product_id": int(item["product_id"]),
+                        "sku": item["sku"],
+                        "product_name": item["product_name"],
+                        "qty": qty,
+                        "amount": amount,
+                    }
+                )
+                total_amount += amount
+
+            if not selected_lines:
+                raise ValueError("Pilih minimal satu item untuk diretur")
+            if total_amount <= 0:
+                raise ValueError("Nilai refund tidak valid")
 
             if refund_method == "Tunai":
                 if shift_id is None:
@@ -370,18 +429,18 @@ class RefundService:
                 """,
                 (
                     refund_no,
-                    preview["sale_id"],
+                    sale["id"],
                     cashier_user_id,
                     shift_id,
                     approved_by,
                     refund_method,
-                    preview["total_amount"],
+                    total_amount,
                     reason,
                 ),
             )
             refund_id = cur.lastrowid
 
-            for line in preview["lines"]:
+            for line in selected_lines:
                 conn.execute(
                     """
                     INSERT INTO refund_items(
@@ -416,7 +475,7 @@ class RefundService:
                 entity_id=refund_no,
                 metadata={
                     "invoice_no": invoice_no,
-                    "amount": preview["total_amount"],
+                    "amount": total_amount,
                     "method": refund_method,
                     "approved_by": approved_by,
                     "reason": reason,
@@ -435,13 +494,13 @@ class RefundService:
                 """,
                 (refund_id,),
             ).fetchone()
-            item_rows = conn.execute(
+            result_items = conn.execute(
                 "SELECT * FROM refund_items WHERE refund_id=? ORDER BY id",
                 (refund_id,),
             ).fetchall()
 
         result = dict(row)
-        result["items"] = [dict(item) for item in item_rows]
+        result["items"] = [dict(item) for item in result_items]
         return result
 
     def list_for_invoice(self, invoice_no: str) -> list[dict]:
