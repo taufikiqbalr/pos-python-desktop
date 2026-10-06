@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from html import escape
+import json
 from pathlib import Path
 import secrets
 
@@ -24,6 +26,12 @@ class AuthService:
         if not row or not row["active"] or not verify_password(password, row["password_hash"]):
             return None
         return {k: row[k] for k in ("id", "username", "full_name", "role")}
+
+    def authenticate_supervisor(self, username: str, password: str) -> dict | None:
+        user = self.authenticate(username, password)
+        if not user or user["role"] not in {"supervisor", "admin"}:
+            return None
+        return user
 
 
 class CatalogService:
@@ -56,6 +64,14 @@ class CatalogService:
             ).fetchone()
         return self._to_product(row) if row else None
 
+    def get_by_id(self, product_id: int) -> Product | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM products WHERE id=? AND active=1",
+                (product_id,),
+            ).fetchone()
+        return self._to_product(row) if row else None
+
     def search(self, term: str = "", limit: int = 100) -> list[Product]:
         term = term.strip()
         like = f"%{term}%"
@@ -73,16 +89,136 @@ class CatalogService:
         return [self._to_product(row) for row in rows]
 
 
+class ShiftService:
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def get_open_shift(self, cashier_user_id: int) -> dict | None:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM shifts
+                WHERE cashier_user_id=? AND status='OPEN'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (cashier_user_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def open_shift(self, cashier_user_id: int, opening_cash: int) -> dict:
+        if opening_cash < 0:
+            raise ValueError("Kas awal tidak boleh negatif")
+        if self.get_open_shift(cashier_user_id):
+            raise ValueError("Kasir masih memiliki shift yang aktif")
+        with self.db.connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO shifts(cashier_user_id, opening_cash) VALUES (?, ?)",
+                (cashier_user_id, opening_cash),
+            )
+            shift_id = cur.lastrowid
+            row = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+        return dict(row)
+
+    def summary(self, shift_id: int) -> dict:
+        with self.db.connect() as conn:
+            shift = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
+            if not shift:
+                raise ValueError("Shift tidak ditemukan")
+
+            sales = conn.execute(
+                """
+                SELECT COUNT(*) AS sales_count,
+                       COALESCE(SUM(grand_total), 0) AS sales_total
+                FROM sales
+                WHERE shift_id=? AND status='COMPLETED'
+                """,
+                (shift_id,),
+            ).fetchone()
+
+            cash = conn.execute(
+                """
+                SELECT COALESCE(SUM(sp.amount), 0) AS cash_received
+                FROM sale_payments sp
+                JOIN sales s ON s.id=sp.sale_id
+                WHERE s.shift_id=? AND s.status='COMPLETED' AND sp.method='Tunai'
+                """,
+                (shift_id,),
+            ).fetchone()
+
+            cash_change = conn.execute(
+                """
+                SELECT COALESCE(SUM(s.change_amount), 0) AS cash_change
+                FROM sales s
+                WHERE s.shift_id=? AND s.status='COMPLETED'
+                  AND EXISTS (
+                      SELECT 1 FROM sale_payments sp
+                      WHERE sp.sale_id=s.id AND sp.method='Tunai'
+                  )
+                """,
+                (shift_id,),
+            ).fetchone()
+
+            breakdown_rows = conn.execute(
+                """
+                SELECT sp.method, COALESCE(SUM(sp.amount), 0) AS amount
+                FROM sale_payments sp
+                JOIN sales s ON s.id=sp.sale_id
+                WHERE s.shift_id=? AND s.status='COMPLETED'
+                GROUP BY sp.method
+                ORDER BY sp.method
+                """,
+                (shift_id,),
+            ).fetchall()
+
+        result = dict(shift)
+        result["sales_count"] = sales["sales_count"]
+        result["sales_total"] = sales["sales_total"]
+        result["cash_received"] = cash["cash_received"]
+        result["cash_change"] = cash_change["cash_change"]
+        result["expected_cash_now"] = (
+            result["opening_cash"] + result["cash_received"] - result["cash_change"]
+        )
+        result["payment_breakdown"] = [dict(row) for row in breakdown_rows]
+        return result
+
+    def close_shift(self, shift_id: int, closing_cash: int, notes: str = "") -> dict:
+        if closing_cash < 0:
+            raise ValueError("Kas akhir tidak boleh negatif")
+        summary = self.summary(shift_id)
+        if summary["status"] != "OPEN":
+            raise ValueError("Shift sudah ditutup")
+        expected = summary["expected_cash_now"]
+        difference = closing_cash - expected
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                UPDATE shifts
+                SET closing_cash=?, expected_cash=?, cash_difference=?,
+                    close_notes=?, closed_at=CURRENT_TIMESTAMP, status='CLOSED'
+                WHERE id=? AND status='OPEN'
+                """,
+                (closing_cash, expected, difference, notes.strip() or None, shift_id),
+            )
+        result = self.summary(shift_id)
+        result["closing_cash"] = closing_cash
+        result["cash_difference"] = difference
+        return result
+
+
 class SaleService:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def _new_invoice_no(self, conn) -> str:
+    @staticmethod
+    def _new_code(conn, *, prefix: str, table: str, column: str) -> str:
         while True:
-            invoice = f"POS-{datetime.now():%Y%m%d-%H%M%S}-{secrets.randbelow(10000):04d}"
-            exists = conn.execute("SELECT 1 FROM sales WHERE invoice_no=?", (invoice,)).fetchone()
+            code = f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}-{secrets.randbelow(10000):04d}"
+            exists = conn.execute(
+                f"SELECT 1 FROM {table} WHERE {column}=?",
+                (code,),
+            ).fetchone()
             if not exists:
-                return invoice
+                return code
 
     def complete_sale(
         self,
@@ -90,38 +226,88 @@ class SaleService:
         cart: Cart,
         cashier_user_id: int,
         customer_name: str,
-        payment_method: str,
-        paid_amount: int,
-        change_amount: int,
+        payments: list[dict] | None = None,
+        shift_id: int | None = None,
         notes: str = "",
+        payment_method: str | None = None,
+        paid_amount: int | None = None,
+        change_amount: int | None = None,
     ) -> dict:
         if not cart.lines:
             raise ValueError("Keranjang masih kosong")
-        if paid_amount < cart.grand_total:
+
+        if payments is None:
+            if not payment_method or paid_amount is None:
+                raise ValueError("Informasi pembayaran belum lengkap")
+            payments = [{"method": payment_method, "amount": int(paid_amount)}]
+
+        normalized_payments: list[dict] = []
+        for payment in payments:
+            method = str(payment.get("method", "")).strip()
+            amount = int(payment.get("amount", 0))
+            if method and amount > 0:
+                normalized_payments.append(
+                    {
+                        "method": method,
+                        "amount": amount,
+                        "reference": str(payment.get("reference", "")).strip() or None,
+                    }
+                )
+
+        total_paid = sum(item["amount"] for item in normalized_payments)
+        if total_paid < cart.grand_total:
             raise ValueError("Nominal pembayaran kurang")
+
+        computed_change = total_paid - cart.grand_total
+        if computed_change > 0 and not any(p["method"] == "Tunai" for p in normalized_payments):
+            raise ValueError("Kelebihan pembayaran hanya diperbolehkan jika ada pembayaran tunai")
+
+        if change_amount is not None and change_amount != computed_change:
+            raise ValueError("Nilai kembalian tidak konsisten dengan total pembayaran")
+
+        methods = list(dict.fromkeys(p["method"] for p in normalized_payments))
+        method_summary = " + ".join(methods)
 
         with self.db.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            invoice_no = self._new_invoice_no(conn)
+
+            if shift_id is not None:
+                shift = conn.execute(
+                    """
+                    SELECT id FROM shifts
+                    WHERE id=? AND cashier_user_id=? AND status='OPEN'
+                    """,
+                    (shift_id, cashier_user_id),
+                ).fetchone()
+                if not shift:
+                    raise ValueError("Shift kasir tidak aktif")
+
+            invoice_no = self._new_code(
+                conn,
+                prefix="POS",
+                table="sales",
+                column="invoice_no",
+            )
             sale_cur = conn.execute(
                 """
                 INSERT INTO sales(
-                    invoice_no, cashier_user_id, customer_name, subtotal,
+                    invoice_no, cashier_user_id, shift_id, customer_name, subtotal,
                     discount_total, tax_total, grand_total, payment_method,
-                    paid_amount, change_amount, notes
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    paid_amount, change_amount, notes, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
                 """,
                 (
                     invoice_no,
                     cashier_user_id,
+                    shift_id,
                     customer_name.strip() or None,
                     cart.subtotal,
                     cart.discount_total,
                     cart.tax_total,
                     cart.grand_total,
-                    payment_method,
-                    paid_amount,
-                    change_amount,
+                    method_summary,
+                    total_paid,
+                    computed_change,
                     notes.strip() or None,
                 ),
             )
@@ -158,14 +344,111 @@ class SaleService:
                     (line.qty, line.product.id),
                 )
 
+            conn.executemany(
+                """
+                INSERT INTO sale_payments(sale_id, method, amount, reference)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (sale_id, p["method"], p["amount"], p["reference"])
+                    for p in normalized_payments
+                ],
+            )
+
         return self.get_sale(invoice_no)
+
+    def hold_cart(
+        self,
+        *,
+        cart: Cart,
+        cashier_user_id: int,
+        customer_name: str,
+        notes: str = "",
+    ) -> dict:
+        if not cart.lines:
+            raise ValueError("Keranjang masih kosong")
+        payload = [
+            {
+                "product_id": line.product.id,
+                "sku": line.product.sku,
+                "qty": line.qty,
+                "discount_percent": str(line.discount_percent),
+            }
+            for line in cart.lines
+        ]
+        with self.db.connect() as conn:
+            hold_no = self._new_code(
+                conn,
+                prefix="HOLD",
+                table="held_sales",
+                column="hold_no",
+            )
+            conn.execute(
+                """
+                INSERT INTO held_sales(
+                    hold_no, cashier_user_id, customer_name,
+                    cart_discount_percent, notes, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    hold_no,
+                    cashier_user_id,
+                    customer_name.strip() or None,
+                    str(cart.cart_discount_percent),
+                    notes.strip() or None,
+                    json.dumps(payload),
+                ),
+            )
+        return self.get_held(hold_no, cashier_user_id)
+
+    def list_held(self, cashier_user_id: int) -> list[dict]:
+        with self.db.connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM held_sales
+                WHERE cashier_user_id=?
+                ORDER BY id DESC
+                """,
+                (cashier_user_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            payload = json.loads(item["payload_json"])
+            item["item_count"] = sum(int(line["qty"]) for line in payload)
+            result.append(item)
+        return result
+
+    def get_held(self, hold_no: str, cashier_user_id: int) -> dict:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM held_sales
+                WHERE hold_no=? AND cashier_user_id=?
+                """,
+                (hold_no, cashier_user_id),
+            ).fetchone()
+        if not row:
+            raise ValueError("Transaksi hold tidak ditemukan")
+        data = dict(row)
+        data["items"] = json.loads(data.pop("payload_json"))
+        return data
+
+    def delete_held(self, hold_no: str, cashier_user_id: int) -> None:
+        with self.db.connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM held_sales WHERE hold_no=? AND cashier_user_id=?",
+                (hold_no, cashier_user_id),
+            )
+            if cur.rowcount == 0:
+                raise ValueError("Transaksi hold tidak ditemukan")
 
     def list_recent(self, limit: int = 100) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
                 """
                 SELECT s.invoice_no, s.customer_name, s.grand_total, s.payment_method,
-                       s.created_at, u.full_name AS cashier_name
+                       s.status, s.created_at, u.full_name AS cashier_name
                 FROM sales s
                 JOIN users u ON u.id=s.cashier_user_id
                 ORDER BY s.id DESC
@@ -179,8 +462,11 @@ class SaleService:
         with self.db.connect() as conn:
             sale = conn.execute(
                 """
-                SELECT s.*, u.full_name AS cashier_name
-                FROM sales s JOIN users u ON u.id=s.cashier_user_id
+                SELECT s.*, u.full_name AS cashier_name,
+                       vu.full_name AS voided_by_name
+                FROM sales s
+                JOIN users u ON u.id=s.cashier_user_id
+                LEFT JOIN users vu ON vu.id=s.voided_by
                 WHERE s.invoice_no=?
                 """,
                 (invoice_no,),
@@ -191,9 +477,75 @@ class SaleService:
                 "SELECT * FROM sale_items WHERE sale_id=? ORDER BY id",
                 (sale["id"],),
             ).fetchall()
+            payments = conn.execute(
+                "SELECT method, amount, reference FROM sale_payments WHERE sale_id=? ORDER BY id",
+                (sale["id"],),
+            ).fetchall()
         data = dict(sale)
         data["items"] = [dict(item) for item in items]
+        data["payments"] = [dict(payment) for payment in payments]
+        if not data["payments"] and data.get("payment_method"):
+            data["payments"] = [
+                {
+                    "method": data["payment_method"],
+                    "amount": data["paid_amount"],
+                    "reference": None,
+                }
+            ]
         return data
+
+    def void_sale(self, invoice_no: str, supervisor_user_id: int, reason: str) -> dict:
+        reason = reason.strip()
+        if not reason:
+            raise ValueError("Alasan void wajib diisi")
+
+        with self.db.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            sale = conn.execute(
+                "SELECT * FROM sales WHERE invoice_no=?",
+                (invoice_no,),
+            ).fetchone()
+            if not sale:
+                raise ValueError("Transaksi tidak ditemukan")
+            if sale["status"] != "COMPLETED":
+                raise ValueError("Transaksi sudah tidak berstatus COMPLETED")
+
+            if sale["shift_id"]:
+                shift = conn.execute(
+                    "SELECT status FROM shifts WHERE id=?",
+                    (sale["shift_id"],),
+                ).fetchone()
+                if shift and shift["status"] != "OPEN":
+                    raise ValueError(
+                        "Transaksi dari shift yang sudah ditutup tidak dapat di-void. "
+                        "Gunakan proses retur/refund."
+                    )
+
+            items = conn.execute(
+                "SELECT product_id, qty FROM sale_items WHERE sale_id=?",
+                (sale["id"],),
+            ).fetchall()
+            for item in items:
+                conn.execute(
+                    """
+                    UPDATE products
+                    SET stock=stock+?, updated_at=CURRENT_TIMESTAMP
+                    WHERE id=?
+                    """,
+                    (item["qty"], item["product_id"]),
+                )
+
+            conn.execute(
+                """
+                UPDATE sales
+                SET status='VOIDED', voided_at=CURRENT_TIMESTAMP,
+                    void_reason=?, voided_by=?
+                WHERE id=?
+                """,
+                (reason, supervisor_user_id, sale["id"]),
+            )
+
+        return self.get_sale(invoice_no)
 
 
 class ReceiptService:
@@ -212,6 +564,8 @@ class ReceiptService:
             f"Waktu: {sale['created_at']}",
             f"Kasir: {sale['cashier_name']}",
         ]
+        if sale.get("status") == "VOIDED":
+            lines.append("*** TRANSAKSI VOID ***".center(width))
         if sale.get("customer_name"):
             lines.append(f"Pelanggan: {sale['customer_name']}")
         lines.append("-" * width)
@@ -228,28 +582,59 @@ class ReceiptService:
                 f"{'Diskon':<24}{('-' + format_rupiah(sale['discount_total'])):>18}",
                 f"{'Pajak':<24}{format_rupiah(sale['tax_total']):>18}",
                 f"{'TOTAL':<24}{format_rupiah(sale['grand_total']):>18}",
-                f"{'Bayar':<24}{format_rupiah(sale['paid_amount']):>18}",
-                f"{'Kembali':<24}{format_rupiah(sale['change_amount']):>18}",
-                f"Metode: {sale['payment_method']}",
-                "=" * width,
-                "Terima kasih".center(width),
             ]
         )
+        for payment in sale.get("payments", []):
+            lines.append(
+                f"{('Bayar ' + payment['method']):<24}{format_rupiah(payment['amount']):>18}"
+            )
+        lines.append(f"{'Kembali':<24}{format_rupiah(sale['change_amount']):>18}")
+        if sale.get("status") == "VOIDED":
+            lines.extend(
+                [
+                    "-" * width,
+                    f"Void: {sale.get('void_reason') or '-'}",
+                    f"Otorisasi: {sale.get('voided_by_name') or '-'}",
+                ]
+            )
+        lines.extend(["=" * width, "Terima kasih".center(width)])
         return "\n".join(lines)
 
     def render_html(self, sale: dict) -> str:
         item_rows = "".join(
-            f"<tr><td>{item['product_name']}<br><small>{item['qty']} x {format_rupiah(item['unit_price'])}</small></td>"
+            f"<tr><td>{escape(str(item['product_name']))}<br>"
+            f"<small>{item['qty']} x {format_rupiah(item['unit_price'])}</small></td>"
             f"<td style='text-align:right'>{format_rupiah(item['line_total'])}</td></tr>"
             for item in sale["items"]
         )
-        customer = f"<div>Pelanggan: {sale['customer_name']}</div>" if sale.get("customer_name") else ""
+        customer = (
+            f"<div>Pelanggan: {escape(str(sale['customer_name']))}</div>"
+            if sale.get("customer_name")
+            else ""
+        )
+        payment_rows = "".join(
+            f"<tr><td>Bayar {escape(str(payment['method']))}</td>"
+            f"<td align='right'>{format_rupiah(payment['amount'])}</td></tr>"
+            for payment in sale.get("payments", [])
+        )
+        void_banner = (
+            "<div style='text-align:center;color:#b42318'><b>TRANSAKSI VOID</b></div>"
+            if sale.get("status") == "VOIDED"
+            else ""
+        )
+        void_detail = (
+            f"<hr><div>Alasan void: {escape(str(sale.get('void_reason') or '-'))}</div>"
+            f"<div>Otorisasi: {escape(str(sale.get('voided_by_name') or '-'))}</div>"
+            if sale.get("status") == "VOIDED"
+            else ""
+        )
         return f"""
         <html><body style="font-family: 'DejaVu Sans Mono', monospace; font-size: 9pt;">
-          <div style="text-align:center"><b>{STORE_NAME}</b><br>{STORE_ADDRESS}<br>Telp: {STORE_PHONE}</div>
+          <div style="text-align:center"><b>{escape(STORE_NAME)}</b><br>{escape(STORE_ADDRESS)}<br>Telp: {escape(STORE_PHONE)}</div>
+          {void_banner}
           <hr>
-          <div>No: {sale['invoice_no']}</div><div>Waktu: {sale['created_at']}</div>
-          <div>Kasir: {sale['cashier_name']}</div>{customer}
+          <div>No: {escape(str(sale['invoice_no']))}</div><div>Waktu: {escape(str(sale['created_at']))}</div>
+          <div>Kasir: {escape(str(sale['cashier_name']))}</div>{customer}
           <hr>
           <table width="100%">{item_rows}</table>
           <hr>
@@ -258,11 +643,11 @@ class ReceiptService:
             <tr><td>Diskon</td><td align="right">-{format_rupiah(sale['discount_total'])}</td></tr>
             <tr><td>Pajak</td><td align="right">{format_rupiah(sale['tax_total'])}</td></tr>
             <tr><td><b>TOTAL</b></td><td align="right"><b>{format_rupiah(sale['grand_total'])}</b></td></tr>
-            <tr><td>Bayar</td><td align="right">{format_rupiah(sale['paid_amount'])}</td></tr>
+            {payment_rows}
             <tr><td>Kembali</td><td align="right">{format_rupiah(sale['change_amount'])}</td></tr>
           </table>
-          <div>Metode: {sale['payment_method']}</div><hr>
-          <div style="text-align:center">Terima kasih</div>
+          {void_detail}
+          <hr><div style="text-align:center">Terima kasih</div>
         </body></html>
         """
 
