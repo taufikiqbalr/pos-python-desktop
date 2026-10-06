@@ -4,17 +4,19 @@ Aplikasi Point of Sales (PoS) desktop untuk kasir toko, dibangun dengan **Python
 
 ## Status
 
-**Operational Cashier MVP**
+**Operational Cashier MVP — Production Controls Phase 2**
 
 Alur inti yang sudah didukung:
 
 ```text
-Login -> Buka Shift -> Scan/Cari Barang -> Cart
+Login -> Buka Shift -> Pilih Anggota (opsional) -> Scan/Cari Barang -> Cart
       -> Diskon Item/Transaksi
       -> Hold/Resume (opsional)
       -> Split/Single Payment
       -> Simpan Transaksi -> Cetak Struk
       -> Riwayat/Reprint/Void
+      -> Return/Refund (partial/full, supervisor approval)
+      -> Cash In/Cash Out
       -> Tutup Shift & Rekonsiliasi Kas
 ```
 
@@ -43,6 +45,50 @@ Login -> Buka Shift -> Scan/Cari Barang -> Cart
   - actual closing cash;
   - cash difference;
   - catatan penutupan.
+
+### Anggota / pelanggan
+
+- Lookup anggota berdasarkan nomor anggota, nama, telepon, atau email.
+- Nomor anggota dan nama pelanggan disimpan pada transaksi.
+- Identitas anggota tetap tersimpan saat transaksi di-hold dan di-resume.
+- Data anggota lokal saat ini hanya adapter development/demo; kontrak service disiapkan agar nanti dapat diganti dengan Membership API Koperasi tanpa mengubah UI kasir.
+- Harga/promosi khusus anggota belum diaktifkan otomatis karena aturan pricing sebaiknya berasal dari service bisnis/promo terpisah.
+
+### Cash in / cash out
+
+- Cash-in dan cash-out hanya dapat dilakukan pada shift aktif.
+- Setiap pergerakan kas membutuhkan otorisasi supervisor/admin.
+- Alasan wajib dicatat.
+- Cash-out tidak boleh melebihi expected cash yang tersedia di laci.
+- Cash-in/cash-out masuk ke perhitungan expected cash saat closing shift.
+- Seluruh aktivitas dicatat pada audit trail.
+
+### Return / refund
+
+- Mendukung partial return maupun full return per item.
+- Qty yang sudah diretur tidak dapat diretur ulang.
+- Stok barang otomatis dikembalikan saat refund berhasil.
+- Refund membutuhkan otorisasi supervisor/admin dan alasan.
+- Metode refund: Tunai, QRIS, Transfer, atau Kartu Debit/Kredit.
+- Refund tunai hanya dapat dilakukan pada shift aktif.
+- Refund tunai tidak boleh membuat expected drawer cash menjadi negatif.
+- Nilai refund dihitung dari **nilai final invoice**, sehingga efek diskon item, diskon transaksi, dan pajak ikut diperhitungkan.
+- Full return seluruh item dijamin tidak melebihi total invoice.
+- Transaksi yang sudah memiliki refund tidak dapat di-void; koreksi berikutnya tetap melalui refund.
+- Refund dipisahkan dari transaksi penjualan asli agar histori/audit tetap immutable.
+
+### Audit trail
+
+Critical cashier events disimpan pada tabel `audit_events`, antara lain:
+
+- shift opened / closed;
+- sale completed;
+- transaction hold / resume / delete;
+- sale voided;
+- refund completed;
+- cash in / cash out.
+
+Audit event menyimpan actor/user, jenis aksi, entity, waktu, dan metadata terkait.
 
 ### Scan, pencarian, dan cart
 
@@ -128,6 +174,8 @@ Untuk menjaga integritas settlement, transaksi yang berasal dari **shift yang su
 | `F7` | Daftar / resume hold |
 | `F8` | Riwayat transaksi |
 | `F9` | Buka / tutup shift |
+| `F10` | Cash in / cash out |
+| `F11` | Return / refund |
 
 ## Arsitektur
 
@@ -254,7 +302,15 @@ Test mencakup:
 - split payment;
 - open/close shift dan cash reconciliation;
 - hold transaction;
-- supervised void dan stock restoration.
+- supervised void dan stock restoration;
+- member/customer attachment;
+- partial dan full refund;
+- refund allocation terhadap final invoice value;
+- refund stock restoration;
+- cash refund pada shift;
+- cash-in / cash-out reconciliation;
+- negative drawer protection;
+- audit events untuk operasi kritikal.
 
 ## Boundary dengan Inventory & User Management
 
@@ -269,17 +325,17 @@ Integration target:
 
 ## Fitur berikutnya sebelum production rollout
 
-Fitur yang masih layak ditambahkan setelah MVP ini:
+Fitur berikutnya setelah Production Controls Phase 2:
 
-- return/refund untuk transaksi dari shift/hari sebelumnya;
-- customer/member lookup dan harga/promosi anggota koperasi;
-- cash-in/cash-out selama shift;
+- integrasi Membership API Koperasi untuk menggantikan data anggota lokal;
+- pricing/promotion engine untuk harga anggota, voucher, dan promo;
 - ESC/POS thermal printer adapter dan cash-drawer trigger;
 - store/register/device identity;
-- audit event yang lebih detail untuk perubahan harga/diskon/void;
 - offline sync queue ke backend pusat;
 - database backup/restore;
 - konfigurasi hak diskon maksimum per role;
-- receipt QR code / digital receipt.
+- refund receipt khusus dan digital receipt/QR code;
+- integrasi Inventory API untuk stock reservation dan movement;
+- packaging Windows (.exe/MSI) serta auto-update.
 
 Inventory master, stock opname, purchase/receiving, supplier, dan user administration **tidak** dimasukkan ke repository ini.
