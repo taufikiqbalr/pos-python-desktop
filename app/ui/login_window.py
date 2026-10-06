@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import (
     AuthService,
     CatalogService,
@@ -30,6 +31,10 @@ class LoginWindow(QMainWindow):
         catalog_service: CatalogService,
         sale_service: SaleService,
         shift_service: ShiftService,
+        customer_service: CustomerService,
+        cash_movement_service: CashMovementService,
+        refund_service: RefundService,
+        audit_service: AuditService,
         receipt_service: ReceiptService,
     ) -> None:
         super().__init__()
@@ -37,6 +42,10 @@ class LoginWindow(QMainWindow):
         self.catalog_service = catalog_service
         self.sale_service = sale_service
         self.shift_service = shift_service
+        self.customer_service = customer_service
+        self.cash_movement_service = cash_movement_service
+        self.refund_service = refund_service
+        self.audit_service = audit_service
         self.receipt_service = receipt_service
         self.pos_window = None
 
@@ -119,6 +128,10 @@ class LoginWindow(QMainWindow):
             catalog_service=self.catalog_service,
             sale_service=self.sale_service,
             shift_service=self.shift_service,
+            customer_service=self.customer_service,
+            cash_movement_service=self.cash_movement_service,
+            refund_service=self.refund_service,
+            audit_service=self.audit_service,
             receipt_service=self.receipt_service,
             on_logout=self.show_after_logout,
         )
