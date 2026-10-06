@@ -79,6 +79,12 @@ class Cart:
     def remove(self, index: int) -> None:
         self.lines.pop(index)
 
+    def set_line_discount(self, index: int, percent: float | Decimal) -> None:
+        value = Decimal(str(percent))
+        if value < 0 or value > 100:
+            raise ValueError("Diskon item harus antara 0 sampai 100 persen")
+        self.lines[index].discount_percent = value
+
     @property
     def item_count(self) -> int:
         return sum(line.qty for line in self.lines)
