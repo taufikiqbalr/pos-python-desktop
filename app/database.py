@@ -49,6 +49,22 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
                 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
 
+                CREATE TABLE IF NOT EXISTS customers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    member_no TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    phone TEXT,
+                    email TEXT,
+                    membership_type TEXT NOT NULL DEFAULT 'MEMBER',
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
+                CREATE INDEX IF NOT EXISTS idx_customers_member_no ON customers(member_no);
+                CREATE INDEX IF NOT EXISTS idx_customers_phone ON customers(phone);
+
                 CREATE TABLE IF NOT EXISTS shifts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     cashier_user_id INTEGER NOT NULL,
@@ -71,6 +87,8 @@ class Database:
                     invoice_no TEXT NOT NULL UNIQUE,
                     cashier_user_id INTEGER NOT NULL,
                     shift_id INTEGER,
+                    customer_id INTEGER,
+                    customer_member_no TEXT,
                     customer_name TEXT,
                     subtotal INTEGER NOT NULL,
                     discount_total INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +105,7 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(cashier_user_id) REFERENCES users(id),
                     FOREIGN KEY(shift_id) REFERENCES shifts(id),
+                    FOREIGN KEY(customer_id) REFERENCES customers(id),
                     FOREIGN KEY(voided_by) REFERENCES users(id)
                 );
 
@@ -130,16 +149,89 @@ class Database:
 
                 CREATE INDEX IF NOT EXISTS idx_held_sales_cashier
                     ON held_sales(cashier_user_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS refunds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    refund_no TEXT NOT NULL UNIQUE,
+                    original_sale_id INTEGER NOT NULL,
+                    cashier_user_id INTEGER NOT NULL,
+                    shift_id INTEGER,
+                    approved_by INTEGER NOT NULL,
+                    refund_method TEXT NOT NULL,
+                    total_amount INTEGER NOT NULL CHECK(total_amount > 0),
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(original_sale_id) REFERENCES sales(id),
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id),
+                    FOREIGN KEY(shift_id) REFERENCES shifts(id),
+                    FOREIGN KEY(approved_by) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_refunds_sale
+                    ON refunds(original_sale_id);
+
+                CREATE TABLE IF NOT EXISTS refund_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    refund_id INTEGER NOT NULL,
+                    sale_item_id INTEGER NOT NULL,
+                    product_id INTEGER NOT NULL,
+                    sku TEXT NOT NULL,
+                    product_name TEXT NOT NULL,
+                    qty INTEGER NOT NULL CHECK(qty > 0),
+                    amount INTEGER NOT NULL CHECK(amount >= 0),
+                    FOREIGN KEY(refund_id) REFERENCES refunds(id) ON DELETE CASCADE,
+                    FOREIGN KEY(sale_item_id) REFERENCES sale_items(id),
+                    FOREIGN KEY(product_id) REFERENCES products(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_refund_items_sale_item
+                    ON refund_items(sale_item_id);
+
+                CREATE TABLE IF NOT EXISTS cash_movements (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    shift_id INTEGER NOT NULL,
+                    cashier_user_id INTEGER NOT NULL,
+                    approved_by INTEGER NOT NULL,
+                    movement_type TEXT NOT NULL CHECK(movement_type IN ('IN', 'OUT')),
+                    amount INTEGER NOT NULL CHECK(amount > 0),
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(shift_id) REFERENCES shifts(id),
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id),
+                    FOREIGN KEY(approved_by) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_cash_movements_shift
+                    ON cash_movements(shift_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    action TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    entity_id TEXT,
+                    metadata_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_audit_events_created
+                    ON audit_events(created_at);
+                CREATE INDEX IF NOT EXISTS idx_audit_events_entity
+                    ON audit_events(entity_type, entity_id);
                 """
             )
             # Lightweight migrations for databases created by earlier MVP versions.
             self._ensure_column(conn, "sales", "shift_id", "INTEGER")
+            self._ensure_column(conn, "sales", "customer_id", "INTEGER")
+            self._ensure_column(conn, "sales", "customer_member_no", "TEXT")
             self._ensure_column(conn, "sales", "status", "TEXT NOT NULL DEFAULT 'COMPLETED'")
             self._ensure_column(conn, "sales", "voided_at", "TEXT")
             self._ensure_column(conn, "sales", "void_reason", "TEXT")
             self._ensure_column(conn, "sales", "voided_by", "INTEGER")
             self._seed_users(conn)
             self._seed_products(conn)
+            self._seed_customers(conn)
 
     @staticmethod
     def _ensure_column(
@@ -187,4 +279,21 @@ class Database:
         conn.executemany(
             "INSERT INTO products(sku, barcode, name, unit, price, stock) VALUES (?, ?, ?, ?, ?, ?)",
             products,
+        )
+
+    @staticmethod
+    def _seed_customers(conn: sqlite3.Connection) -> None:
+        existing = conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+        if existing:
+            return
+        conn.executemany(
+            """
+            INSERT INTO customers(member_no, name, phone, email, membership_type)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                ("BRIN-0001", "Anggota Demo 1", "081200000001", "anggota1@example.local", "MEMBER"),
+                ("BRIN-0002", "Anggota Demo 2", "081200000002", "anggota2@example.local", "MEMBER"),
+                ("BRIN-0003", "Anggota Demo 3", "081200000003", "anggota3@example.local", "MEMBER"),
+            ],
         )
