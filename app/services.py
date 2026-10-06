@@ -747,6 +747,8 @@ class ReceiptService:
             lines.append("*** TRANSAKSI VOID ***".center(width))
         if sale.get("customer_name"):
             lines.append(f"Pelanggan: {sale['customer_name']}")
+        if sale.get("customer_member_no"):
+            lines.append(f"No. Anggota: {sale['customer_member_no']}")
         lines.append("-" * width)
         for item in sale["items"]:
             lines.append(item["product_name"][:width])
@@ -768,6 +770,8 @@ class ReceiptService:
                 f"{('Bayar ' + payment['method']):<24}{format_rupiah(payment['amount']):>18}"
             )
         lines.append(f"{'Kembali':<24}{format_rupiah(sale['change_amount']):>18}")
+        if sale.get("refund_total", 0):
+            lines.append(f"{'Sudah direfund':<24}{format_rupiah(sale['refund_total']):>18}")
         if sale.get("status") == "VOIDED":
             lines.extend(
                 [
@@ -789,6 +793,16 @@ class ReceiptService:
         customer = (
             f"<div>Pelanggan: {escape(str(sale['customer_name']))}</div>"
             if sale.get("customer_name")
+            else ""
+        )
+        member = (
+            f"<div>No. Anggota: {escape(str(sale['customer_member_no']))}</div>"
+            if sale.get("customer_member_no")
+            else ""
+        )
+        refunded = (
+            f"<tr><td>Sudah direfund</td><td align='right'>{format_rupiah(sale.get('refund_total', 0))}</td></tr>"
+            if sale.get("refund_total", 0)
             else ""
         )
         payment_rows = "".join(
@@ -813,7 +827,7 @@ class ReceiptService:
           {void_banner}
           <hr>
           <div>No: {escape(str(sale['invoice_no']))}</div><div>Waktu: {escape(str(sale['created_at']))}</div>
-          <div>Kasir: {escape(str(sale['cashier_name']))}</div>{customer}
+          <div>Kasir: {escape(str(sale['cashier_name']))}</div>{customer}{member}
           <hr>
           <table width="100%">{item_rows}</table>
           <hr>
@@ -824,6 +838,7 @@ class ReceiptService:
             <tr><td><b>TOTAL</b></td><td align="right"><b>{format_rupiah(sale['grand_total'])}</b></td></tr>
             {payment_rows}
             <tr><td>Kembali</td><td align="right">{format_rupiah(sale['change_amount'])}</td></tr>
+            {refunded}
           </table>
           {void_detail}
           <hr><div style="text-align:center">Terima kasih</div>
