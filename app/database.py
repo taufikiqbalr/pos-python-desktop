@@ -139,12 +139,15 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     hold_no TEXT NOT NULL UNIQUE,
                     cashier_user_id INTEGER NOT NULL,
+                    customer_id INTEGER,
+                    customer_member_no TEXT,
                     customer_name TEXT,
                     cart_discount_percent TEXT NOT NULL DEFAULT '0',
                     notes TEXT,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(cashier_user_id) REFERENCES users(id)
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id),
+                    FOREIGN KEY(customer_id) REFERENCES customers(id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_held_sales_cashier
@@ -229,6 +232,8 @@ class Database:
             self._ensure_column(conn, "sales", "voided_at", "TEXT")
             self._ensure_column(conn, "sales", "void_reason", "TEXT")
             self._ensure_column(conn, "sales", "voided_by", "INTEGER")
+            self._ensure_column(conn, "held_sales", "customer_id", "INTEGER")
+            self._ensure_column(conn, "held_sales", "customer_member_no", "TEXT")
             self._seed_users(conn)
             self._seed_products(conn)
             self._seed_customers(conn)
