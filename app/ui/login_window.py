@@ -13,7 +13,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.services import AuthService, CatalogService, ReceiptService, SaleService
+from app.services import (
+    AuthService,
+    CatalogService,
+    ReceiptService,
+    SaleService,
+    ShiftService,
+)
 
 
 class LoginWindow(QMainWindow):
@@ -23,12 +29,14 @@ class LoginWindow(QMainWindow):
         auth_service: AuthService,
         catalog_service: CatalogService,
         sale_service: SaleService,
+        shift_service: ShiftService,
         receipt_service: ReceiptService,
     ) -> None:
         super().__init__()
         self.auth_service = auth_service
         self.catalog_service = catalog_service
         self.sale_service = sale_service
+        self.shift_service = shift_service
         self.receipt_service = receipt_service
         self.pos_window = None
 
@@ -46,7 +54,10 @@ class LoginWindow(QMainWindow):
         left = QVBoxLayout()
         brand = QLabel("KOPERASI BRIN\nPOINT OF SALES")
         brand.setObjectName("Title")
-        intro = QLabel("Aplikasi kasir desktop untuk transaksi toko yang cepat, sederhana, dan siap diintegrasikan dengan layanan inventory terpisah.")
+        intro = QLabel(
+            "Aplikasi kasir desktop untuk transaksi toko yang cepat, "
+            "sederhana, dan siap diintegrasikan dengan layanan inventory terpisah."
+        )
         intro.setWordWrap(True)
         intro.setObjectName("Subtitle")
         left.addStretch()
@@ -104,8 +115,10 @@ class LoginWindow(QMainWindow):
 
         self.pos_window = PosWindow(
             user=user,
+            auth_service=self.auth_service,
             catalog_service=self.catalog_service,
             sale_service=self.sale_service,
+            shift_service=self.shift_service,
             receipt_service=self.receipt_service,
             on_logout=self.show_after_logout,
         )
