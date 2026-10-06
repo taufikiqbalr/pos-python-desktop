@@ -254,10 +254,16 @@ class CloseShiftDialog(QDialog):
         form = QFormLayout()
         form.addRow("Dibuka", QLabel(str(summary["opened_at"])))
         form.addRow("Jumlah transaksi", QLabel(str(summary["sales_count"])))
-        form.addRow("Total penjualan", QLabel(format_rupiah(summary["sales_total"])))
+        form.addRow("Gross sales", QLabel(format_rupiah(summary["sales_total"])))
+        form.addRow("Jumlah refund", QLabel(str(summary.get("refund_count", 0))))
+        form.addRow("Total refund", QLabel(format_rupiah(summary.get("refund_total", 0))))
+        form.addRow("Net sales", QLabel(format_rupiah(summary.get("net_sales_total", summary["sales_total"]))))
         form.addRow("Kas awal", QLabel(format_rupiah(summary["opening_cash"])))
         form.addRow("Penerimaan tunai", QLabel(format_rupiah(summary["cash_received"])))
         form.addRow("Kembalian tunai", QLabel(format_rupiah(summary["cash_change"])))
+        form.addRow("Refund tunai", QLabel(format_rupiah(summary.get("cash_refund", 0))))
+        form.addRow("Cash in", QLabel(format_rupiah(summary.get("cash_in", 0))))
+        form.addRow("Cash out", QLabel(format_rupiah(summary.get("cash_out", 0))))
         form.addRow("Kas seharusnya", QLabel(format_rupiah(summary["expected_cash_now"])))
 
         self.closing_cash = QSpinBox()
@@ -279,6 +285,15 @@ class CloseShiftDialog(QDialog):
                 for row in summary["payment_breakdown"]
             )
             info = QLabel(f"Breakdown pembayaran: {breakdown}")
+            info.setWordWrap(True)
+            layout.addWidget(info)
+
+        if summary.get("refund_breakdown"):
+            refund_breakdown = " • ".join(
+                f"{row['method']}: {format_rupiah(row['amount'])}"
+                for row in summary["refund_breakdown"]
+            )
+            info = QLabel(f"Breakdown refund: {refund_breakdown}")
             info.setWordWrap(True)
             layout.addWidget(info)
 
@@ -520,7 +535,7 @@ class HistoryDialog(QDialog):
                 sale.get("customer_name") or "-",
                 sale["payment_method"],
                 format_rupiah(sale["grand_total"]),
-                sale["status"],
+                sale.get("display_status", sale["status"]),
             ]
             for col, value in enumerate(values):
                 self.table.setItem(row_index, col, QTableWidgetItem(str(value)))
