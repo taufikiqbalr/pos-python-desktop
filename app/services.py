@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import secrets
 
+from app.audit import write_audit
 from app.config import RECEIPT_DIR, STORE_ADDRESS, STORE_NAME, STORE_PHONE, format_rupiah
 from app.database import Database
 from app.domain import Cart, Product
@@ -116,6 +117,14 @@ class ShiftService:
                 (cashier_user_id, opening_cash),
             )
             shift_id = cur.lastrowid
+            write_audit(
+                conn,
+                user_id=cashier_user_id,
+                action="SHIFT_OPENED",
+                entity_type="shift",
+                entity_id=shift_id,
+                metadata={"opening_cash": opening_cash},
+            )
             row = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
         return dict(row)
 
@@ -158,6 +167,29 @@ class ShiftService:
                 (shift_id,),
             ).fetchone()
 
+            refunds = conn.execute(
+                """
+                SELECT COUNT(*) AS refund_count,
+                       COALESCE(SUM(total_amount), 0) AS refund_total,
+                       COALESCE(SUM(CASE WHEN refund_method='Tunai' THEN total_amount ELSE 0 END), 0)
+                           AS cash_refund
+                FROM refunds
+                WHERE shift_id=?
+                """,
+                (shift_id,),
+            ).fetchone()
+
+            movements = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN movement_type='IN' THEN amount ELSE 0 END), 0) AS cash_in,
+                    COALESCE(SUM(CASE WHEN movement_type='OUT' THEN amount ELSE 0 END), 0) AS cash_out
+                FROM cash_movements
+                WHERE shift_id=?
+                """,
+                (shift_id,),
+            ).fetchone()
+
             breakdown_rows = conn.execute(
                 """
                 SELECT sp.method, COALESCE(SUM(sp.amount), 0) AS amount
@@ -170,15 +202,38 @@ class ShiftService:
                 (shift_id,),
             ).fetchall()
 
+            refund_breakdown_rows = conn.execute(
+                """
+                SELECT refund_method AS method, COALESCE(SUM(total_amount), 0) AS amount
+                FROM refunds
+                WHERE shift_id=?
+                GROUP BY refund_method
+                ORDER BY refund_method
+                """,
+                (shift_id,),
+            ).fetchall()
+
         result = dict(shift)
-        result["sales_count"] = sales["sales_count"]
-        result["sales_total"] = sales["sales_total"]
-        result["cash_received"] = cash["cash_received"]
-        result["cash_change"] = cash_change["cash_change"]
+        result["sales_count"] = int(sales["sales_count"])
+        result["sales_total"] = int(sales["sales_total"])
+        result["refund_count"] = int(refunds["refund_count"])
+        result["refund_total"] = int(refunds["refund_total"])
+        result["net_sales_total"] = result["sales_total"] - result["refund_total"]
+        result["cash_received"] = int(cash["cash_received"])
+        result["cash_change"] = int(cash_change["cash_change"])
+        result["cash_refund"] = int(refunds["cash_refund"])
+        result["cash_in"] = int(movements["cash_in"])
+        result["cash_out"] = int(movements["cash_out"])
         result["expected_cash_now"] = (
-            result["opening_cash"] + result["cash_received"] - result["cash_change"]
+            result["opening_cash"]
+            + result["cash_received"]
+            - result["cash_change"]
+            - result["cash_refund"]
+            + result["cash_in"]
+            - result["cash_out"]
         )
         result["payment_breakdown"] = [dict(row) for row in breakdown_rows]
+        result["refund_breakdown"] = [dict(row) for row in refund_breakdown_rows]
         return result
 
     def close_shift(self, shift_id: int, closing_cash: int, notes: str = "") -> dict:
@@ -199,11 +254,23 @@ class ShiftService:
                 """,
                 (closing_cash, expected, difference, notes.strip() or None, shift_id),
             )
+            write_audit(
+                conn,
+                user_id=int(summary["cashier_user_id"]),
+                action="SHIFT_CLOSED",
+                entity_type="shift",
+                entity_id=shift_id,
+                metadata={
+                    "expected_cash": expected,
+                    "closing_cash": closing_cash,
+                    "cash_difference": difference,
+                    "notes": notes.strip(),
+                },
+            )
         result = self.summary(shift_id)
         result["closing_cash"] = closing_cash
         result["cash_difference"] = difference
         return result
-
 
 class SaleService:
     def __init__(self, db: Database) -> None:
@@ -229,6 +296,8 @@ class SaleService:
         payments: list[dict] | None = None,
         shift_id: int | None = None,
         notes: str = "",
+        customer_id: int | None = None,
+        customer_member_no: str | None = None,
         payment_method: str | None = None,
         paid_amount: int | None = None,
         change_amount: int | None = None,
@@ -282,6 +351,21 @@ class SaleService:
                 if not shift:
                     raise ValueError("Shift kasir tidak aktif")
 
+            resolved_customer_name = customer_name.strip() or None
+            resolved_member_no = customer_member_no.strip() if customer_member_no else None
+            if customer_id is not None:
+                customer = conn.execute(
+                    """
+                    SELECT id, member_no, name FROM customers
+                    WHERE id=? AND active=1
+                    """,
+                    (customer_id,),
+                ).fetchone()
+                if not customer:
+                    raise ValueError("Data anggota/pelanggan tidak aktif atau tidak ditemukan")
+                resolved_customer_name = customer["name"]
+                resolved_member_no = customer["member_no"]
+
             invoice_no = self._new_code(
                 conn,
                 prefix="POS",
@@ -291,16 +375,19 @@ class SaleService:
             sale_cur = conn.execute(
                 """
                 INSERT INTO sales(
-                    invoice_no, cashier_user_id, shift_id, customer_name, subtotal,
+                    invoice_no, cashier_user_id, shift_id, customer_id,
+                    customer_member_no, customer_name, subtotal,
                     discount_total, tax_total, grand_total, payment_method,
                     paid_amount, change_amount, notes, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
                 """,
                 (
                     invoice_no,
                     cashier_user_id,
                     shift_id,
-                    customer_name.strip() or None,
+                    customer_id,
+                    resolved_member_no,
+                    resolved_customer_name,
                     cart.subtotal,
                     cart.discount_total,
                     cart.tax_total,
@@ -354,6 +441,19 @@ class SaleService:
                     for p in normalized_payments
                 ],
             )
+            write_audit(
+                conn,
+                user_id=cashier_user_id,
+                action="SALE_COMPLETED",
+                entity_type="sale",
+                entity_id=invoice_no,
+                metadata={
+                    "grand_total": cart.grand_total,
+                    "payment_method": method_summary,
+                    "shift_id": shift_id,
+                    "customer_member_no": resolved_member_no,
+                },
+            )
 
         return self.get_sale(invoice_no)
 
@@ -364,6 +464,8 @@ class SaleService:
         cashier_user_id: int,
         customer_name: str,
         notes: str = "",
+        customer_id: int | None = None,
+        customer_member_no: str | None = None,
     ) -> dict:
         if not cart.lines:
             raise ValueError("Keranjang masih kosong")
@@ -377,6 +479,18 @@ class SaleService:
             for line in cart.lines
         ]
         with self.db.connect() as conn:
+            resolved_customer_name = customer_name.strip() or None
+            resolved_member_no = customer_member_no.strip() if customer_member_no else None
+            if customer_id is not None:
+                customer = conn.execute(
+                    "SELECT id, member_no, name FROM customers WHERE id=? AND active=1",
+                    (customer_id,),
+                ).fetchone()
+                if not customer:
+                    raise ValueError("Data anggota/pelanggan tidak aktif atau tidak ditemukan")
+                resolved_customer_name = customer["name"]
+                resolved_member_no = customer["member_no"]
+
             hold_no = self._new_code(
                 conn,
                 prefix="HOLD",
@@ -386,18 +500,28 @@ class SaleService:
             conn.execute(
                 """
                 INSERT INTO held_sales(
-                    hold_no, cashier_user_id, customer_name,
-                    cart_discount_percent, notes, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    hold_no, cashier_user_id, customer_id, customer_member_no,
+                    customer_name, cart_discount_percent, notes, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     hold_no,
                     cashier_user_id,
-                    customer_name.strip() or None,
+                    customer_id,
+                    resolved_member_no,
+                    resolved_customer_name,
                     str(cart.cart_discount_percent),
                     notes.strip() or None,
                     json.dumps(payload),
                 ),
+            )
+            write_audit(
+                conn,
+                user_id=cashier_user_id,
+                action="HOLD_CREATED",
+                entity_type="held_sale",
+                entity_id=hold_no,
+                metadata={"customer_member_no": resolved_member_no, "item_count": cart.item_count},
             )
         return self.get_held(hold_no, cashier_user_id)
 
@@ -434,7 +558,12 @@ class SaleService:
         data["items"] = json.loads(data.pop("payload_json"))
         return data
 
-    def delete_held(self, hold_no: str, cashier_user_id: int) -> None:
+    def delete_held(
+        self,
+        hold_no: str,
+        cashier_user_id: int,
+        audit_action: str = "HOLD_DELETED",
+    ) -> None:
         with self.db.connect() as conn:
             cur = conn.execute(
                 "DELETE FROM held_sales WHERE hold_no=? AND cashier_user_id=?",
@@ -442,13 +571,26 @@ class SaleService:
             )
             if cur.rowcount == 0:
                 raise ValueError("Transaksi hold tidak ditemukan")
+            write_audit(
+                conn,
+                user_id=cashier_user_id,
+                action=audit_action,
+                entity_type="held_sale",
+                entity_id=hold_no,
+            )
 
     def list_recent(self, limit: int = 100) -> list[dict]:
         with self.db.connect() as conn:
             rows = conn.execute(
                 """
-                SELECT s.invoice_no, s.customer_name, s.grand_total, s.payment_method,
-                       s.status, s.created_at, u.full_name AS cashier_name
+                SELECT s.invoice_no, s.customer_member_no, s.customer_name,
+                       s.grand_total, s.payment_method, s.status, s.created_at,
+                       u.full_name AS cashier_name,
+                       COALESCE((
+                           SELECT SUM(r.total_amount)
+                           FROM refunds r
+                           WHERE r.original_sale_id=s.id
+                       ), 0) AS refund_total
                 FROM sales s
                 JOIN users u ON u.id=s.cashier_user_id
                 ORDER BY s.id DESC
@@ -456,7 +598,19 @@ class SaleService:
                 """,
                 (limit,),
             ).fetchall()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            if item["status"] == "VOIDED":
+                item["display_status"] = "VOIDED"
+            elif item["refund_total"] >= item["grand_total"] and item["refund_total"] > 0:
+                item["display_status"] = "REFUNDED"
+            elif item["refund_total"] > 0:
+                item["display_status"] = "PARTIAL REFUND"
+            else:
+                item["display_status"] = "COMPLETED"
+            result.append(item)
+        return result
 
     def get_sale(self, invoice_no: str) -> dict:
         with self.db.connect() as conn:
@@ -481,6 +635,17 @@ class SaleService:
                 "SELECT method, amount, reference FROM sale_payments WHERE sale_id=? ORDER BY id",
                 (sale["id"],),
             ).fetchall()
+            refunds = conn.execute(
+                """
+                SELECT r.refund_no, r.refund_method, r.total_amount, r.reason,
+                       r.created_at, a.full_name AS approved_by_name
+                FROM refunds r
+                JOIN users a ON a.id=r.approved_by
+                WHERE r.original_sale_id=?
+                ORDER BY r.id
+                """,
+                (sale["id"],),
+            ).fetchall()
         data = dict(sale)
         data["items"] = [dict(item) for item in items]
         data["payments"] = [dict(payment) for payment in payments]
@@ -492,6 +657,8 @@ class SaleService:
                     "reference": None,
                 }
             ]
+        data["refunds"] = [dict(row) for row in refunds]
+        data["refund_total"] = sum(int(row["total_amount"]) for row in data["refunds"])
         return data
 
     def void_sale(self, invoice_no: str, supervisor_user_id: int, reason: str) -> dict:
@@ -509,6 +676,11 @@ class SaleService:
                 raise ValueError("Transaksi tidak ditemukan")
             if sale["status"] != "COMPLETED":
                 raise ValueError("Transaksi sudah tidak berstatus COMPLETED")
+            if conn.execute(
+                "SELECT 1 FROM refunds WHERE original_sale_id=? LIMIT 1",
+                (sale["id"],),
+            ).fetchone():
+                raise ValueError("Transaksi yang sudah memiliki refund tidak dapat di-void")
 
             if sale["shift_id"]:
                 shift = conn.execute(
@@ -518,7 +690,7 @@ class SaleService:
                 if shift and shift["status"] != "OPEN":
                     raise ValueError(
                         "Transaksi dari shift yang sudah ditutup tidak dapat di-void. "
-                        "Gunakan proses retur/refund."
+                        "Gunakan proses return/refund."
                     )
 
             items = conn.execute(
@@ -544,9 +716,16 @@ class SaleService:
                 """,
                 (reason, supervisor_user_id, sale["id"]),
             )
+            write_audit(
+                conn,
+                user_id=supervisor_user_id,
+                action="SALE_VOIDED",
+                entity_type="sale",
+                entity_id=invoice_no,
+                metadata={"reason": reason},
+            )
 
         return self.get_sale(invoice_no)
-
 
 class ReceiptService:
     def __init__(self, output_dir: str | Path | None = None) -> None:
