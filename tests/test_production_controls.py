@@ -195,6 +195,18 @@ class ProductionControlTests(unittest.TestCase):
         self.assertIn("SALE_COMPLETED", actions)
         self.assertIn("REFUND_COMPLETED", actions)
 
+    def test_cash_out_cannot_exceed_expected_drawer_cash(self):
+        shift = self.shifts.open_shift(self.cashier["id"], 10_000)
+        with self.assertRaises(ValueError):
+            self.cash.record(
+                shift_id=shift["id"],
+                cashier_user_id=self.cashier["id"],
+                approved_by=self.supervisor["id"],
+                movement_type="OUT",
+                amount=20_000,
+                reason="Nominal terlalu besar",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
