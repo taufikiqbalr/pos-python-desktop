@@ -49,10 +49,28 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_products_barcode ON products(barcode);
                 CREATE INDEX IF NOT EXISTS idx_products_sku ON products(sku);
 
+                CREATE TABLE IF NOT EXISTS shifts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    cashier_user_id INTEGER NOT NULL,
+                    opening_cash INTEGER NOT NULL DEFAULT 0,
+                    opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    closing_cash INTEGER,
+                    expected_cash INTEGER,
+                    cash_difference INTEGER,
+                    close_notes TEXT,
+                    closed_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'OPEN',
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_shifts_cashier_status
+                    ON shifts(cashier_user_id, status);
+
                 CREATE TABLE IF NOT EXISTS sales (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     invoice_no TEXT NOT NULL UNIQUE,
                     cashier_user_id INTEGER NOT NULL,
+                    shift_id INTEGER,
                     customer_name TEXT,
                     subtotal INTEGER NOT NULL,
                     discount_total INTEGER NOT NULL DEFAULT 0,
@@ -62,8 +80,14 @@ class Database:
                     paid_amount INTEGER NOT NULL,
                     change_amount INTEGER NOT NULL DEFAULT 0,
                     notes TEXT,
+                    status TEXT NOT NULL DEFAULT 'COMPLETED',
+                    voided_at TEXT,
+                    void_reason TEXT,
+                    voided_by INTEGER,
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY(cashier_user_id) REFERENCES users(id)
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id),
+                    FOREIGN KEY(shift_id) REFERENCES shifts(id),
+                    FOREIGN KEY(voided_by) REFERENCES users(id)
                 );
 
                 CREATE TABLE IF NOT EXISTS sale_items (
@@ -79,10 +103,54 @@ class Database:
                     FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE CASCADE,
                     FOREIGN KEY(product_id) REFERENCES products(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS sale_payments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sale_id INTEGER NOT NULL,
+                    method TEXT NOT NULL,
+                    amount INTEGER NOT NULL CHECK(amount >= 0),
+                    reference TEXT,
+                    FOREIGN KEY(sale_id) REFERENCES sales(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_sale_payments_sale
+                    ON sale_payments(sale_id);
+
+                CREATE TABLE IF NOT EXISTS held_sales (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hold_no TEXT NOT NULL UNIQUE,
+                    cashier_user_id INTEGER NOT NULL,
+                    customer_name TEXT,
+                    cart_discount_percent TEXT NOT NULL DEFAULT '0',
+                    notes TEXT,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(cashier_user_id) REFERENCES users(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_held_sales_cashier
+                    ON held_sales(cashier_user_id, created_at);
                 """
             )
+            # Lightweight migrations for databases created by earlier MVP versions.
+            self._ensure_column(conn, "sales", "shift_id", "INTEGER")
+            self._ensure_column(conn, "sales", "status", "TEXT NOT NULL DEFAULT 'COMPLETED'")
+            self._ensure_column(conn, "sales", "voided_at", "TEXT")
+            self._ensure_column(conn, "sales", "void_reason", "TEXT")
+            self._ensure_column(conn, "sales", "voided_by", "INTEGER")
             self._seed_users(conn)
             self._seed_products(conn)
+
+    @staticmethod
+    def _ensure_column(
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     @staticmethod
     def _seed_users(conn: sqlite3.Connection) -> None:
