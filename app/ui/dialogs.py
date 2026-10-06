@@ -4,6 +4,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QTextDocument
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -22,7 +23,10 @@ from PySide6.QtWidgets import (
 
 from app.config import format_rupiah
 from app.domain import Product
-from app.services import CatalogService, ReceiptService, SaleService
+from app.services import AuthService, CatalogService, ReceiptService, SaleService
+
+
+PAYMENT_METHODS = ["Tunai", "QRIS", "Kartu Debit/Kredit", "Transfer"]
 
 
 class ProductSearchDialog(QDialog):
@@ -84,7 +88,7 @@ class PaymentDialog(QDialog):
         super().__init__(parent)
         self.total = total
         self.setWindowTitle("Pembayaran")
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(470)
 
         layout = QVBoxLayout(self)
         title = QLabel(f"Total {format_rupiah(total)}")
@@ -92,26 +96,39 @@ class PaymentDialog(QDialog):
         layout.addWidget(title)
 
         form = QFormLayout()
-        self.method = QComboBox()
-        self.method.addItems(["Tunai", "QRIS", "Kartu Debit/Kredit", "Transfer"])
-        self.paid = QSpinBox()
-        self.paid.setRange(0, 2_147_483_647)
-        self.paid.setSingleStep(1000)
-        self.paid.setGroupSeparatorShown(True)
-        self.paid.setValue(total)
+        self.method1 = QComboBox()
+        self.method1.addItems(PAYMENT_METHODS)
+        self.paid1 = self._money_spin(total)
+        form.addRow("Metode pembayaran 1", self.method1)
+        form.addRow("Nominal 1", self.paid1)
+
+        self.split_check = QCheckBox("Split pembayaran / dua metode")
+        form.addRow("", self.split_check)
+
+        self.method2 = QComboBox()
+        self.method2.addItems(PAYMENT_METHODS)
+        self.method2.setCurrentText("QRIS")
+        self.paid2 = self._money_spin(0)
+        self.method2.setEnabled(False)
+        self.paid2.setEnabled(False)
+        form.addRow("Metode pembayaran 2", self.method2)
+        form.addRow("Nominal 2", self.paid2)
+
+        self.remaining_label = QLabel(format_rupiah(0))
         self.change_label = QLabel(format_rupiah(0))
-        form.addRow("Metode", self.method)
-        form.addRow("Nominal dibayar", self.paid)
+        form.addRow("Sisa yang harus dibayar", self.remaining_label)
         form.addRow("Kembalian", self.change_label)
         layout.addLayout(form)
 
         quick = QHBoxLayout()
         for amount in (10_000, 20_000, 50_000, 100_000):
             button = QPushButton(f"+{amount//1000}K")
-            button.clicked.connect(lambda _=False, x=amount: self.paid.setValue(self.paid.value() + x))
+            button.clicked.connect(
+                lambda _=False, x=amount: self.paid1.setValue(self.paid1.value() + x)
+            )
             quick.addWidget(button)
         exact = QPushButton("Uang Pas")
-        exact.clicked.connect(lambda: self.paid.setValue(self.total))
+        exact.clicked.connect(self._set_exact)
         quick.addWidget(exact)
         layout.addLayout(quick)
 
@@ -120,40 +137,295 @@ class PaymentDialog(QDialog):
         buttons.button(QDialogButtonBox.Ok).setObjectName("PrimaryButton")
         layout.addWidget(buttons)
 
-        self.method.currentTextChanged.connect(self._method_changed)
-        self.paid.valueChanged.connect(self._update_change)
+        self.split_check.toggled.connect(self._toggle_split)
+        self.paid1.valueChanged.connect(self._update_totals)
+        self.paid2.valueChanged.connect(self._update_totals)
         buttons.accepted.connect(self._validate)
         buttons.rejected.connect(self.reject)
-        self._update_change()
+        self._update_totals()
 
-    def _method_changed(self, method: str) -> None:
-        cash = method == "Tunai"
-        self.paid.setEnabled(cash)
-        if not cash:
-            self.paid.setValue(self.total)
-        self._update_change()
+    @staticmethod
+    def _money_spin(value: int) -> QSpinBox:
+        spin = QSpinBox()
+        spin.setRange(0, 2_147_483_647)
+        spin.setSingleStep(1000)
+        spin.setGroupSeparatorShown(True)
+        spin.setValue(value)
+        return spin
 
-    def _update_change(self) -> None:
-        change = max(0, self.paid.value() - self.total)
+    def _toggle_split(self, enabled: bool) -> None:
+        self.method2.setEnabled(enabled)
+        self.paid2.setEnabled(enabled)
+        if enabled:
+            first = self.total // 2
+            self.paid1.setValue(first)
+            self.paid2.setValue(self.total - first)
+        else:
+            self.paid1.setValue(self.total)
+            self.paid2.setValue(0)
+        self._update_totals()
+
+    def _set_exact(self) -> None:
+        if self.split_check.isChecked():
+            self.paid2.setValue(max(0, self.total - self.paid1.value()))
+        else:
+            self.paid1.setValue(self.total)
+
+    def _update_totals(self) -> None:
+        total_paid = self.paid1.value()
+        if self.split_check.isChecked():
+            total_paid += self.paid2.value()
+        remaining = max(0, self.total - total_paid)
+        change = max(0, total_paid - self.total)
+        self.remaining_label.setText(format_rupiah(remaining))
         self.change_label.setText(format_rupiah(change))
 
     def _validate(self) -> None:
-        if self.paid.value() < self.total:
-            QMessageBox.warning(self, "Pembayaran Kurang", "Nominal pembayaran belum mencukupi total transaksi.")
+        payments = self.payments
+        total_paid = sum(payment["amount"] for payment in payments)
+        if total_paid < self.total:
+            QMessageBox.warning(
+                self,
+                "Pembayaran Kurang",
+                "Total nominal pembayaran belum mencukupi total transaksi.",
+            )
+            return
+        if total_paid > self.total and not any(p["method"] == "Tunai" for p in payments):
+            QMessageBox.warning(
+                self,
+                "Pembayaran Tidak Valid",
+                "Kelebihan pembayaran hanya dapat diberikan sebagai kembalian tunai.",
+            )
             return
         self.accept()
 
     @property
+    def payments(self) -> list[dict]:
+        items = [{"method": self.method1.currentText(), "amount": self.paid1.value()}]
+        if self.split_check.isChecked() and self.paid2.value() > 0:
+            items.append({"method": self.method2.currentText(), "amount": self.paid2.value()})
+        return [item for item in items if item["amount"] > 0]
+
+    @property
     def payment_method(self) -> str:
-        return self.method.currentText()
+        return " + ".join(dict.fromkeys(p["method"] for p in self.payments))
 
     @property
     def paid_amount(self) -> int:
-        return self.paid.value()
+        return sum(p["amount"] for p in self.payments)
 
     @property
     def change_amount(self) -> int:
-        return max(0, self.paid.value() - self.total)
+        return max(0, self.paid_amount - self.total)
+
+
+class OpenShiftDialog(QDialog):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Buka Shift Kasir")
+        self.setMinimumWidth(380)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Masukkan saldo kas awal sebelum transaksi pertama."))
+
+        form = QFormLayout()
+        self.opening_cash = QSpinBox()
+        self.opening_cash.setRange(0, 2_147_483_647)
+        self.opening_cash.setSingleStep(10_000)
+        self.opening_cash.setGroupSeparatorShown(True)
+        form.addRow("Kas awal", self.opening_cash)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttons.button(QDialogButtonBox.Ok).setText("Buka Shift")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("PrimaryButton")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class CloseShiftDialog(QDialog):
+    def __init__(self, summary: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.summary = summary
+        self.setWindowTitle("Tutup Shift Kasir")
+        self.setMinimumWidth(460)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        form.addRow("Dibuka", QLabel(str(summary["opened_at"])))
+        form.addRow("Jumlah transaksi", QLabel(str(summary["sales_count"])))
+        form.addRow("Total penjualan", QLabel(format_rupiah(summary["sales_total"])))
+        form.addRow("Kas awal", QLabel(format_rupiah(summary["opening_cash"])))
+        form.addRow("Penerimaan tunai", QLabel(format_rupiah(summary["cash_received"])))
+        form.addRow("Kembalian tunai", QLabel(format_rupiah(summary["cash_change"])))
+        form.addRow("Kas seharusnya", QLabel(format_rupiah(summary["expected_cash_now"])))
+
+        self.closing_cash = QSpinBox()
+        self.closing_cash.setRange(0, 2_147_483_647)
+        self.closing_cash.setSingleStep(10_000)
+        self.closing_cash.setGroupSeparatorShown(True)
+        self.closing_cash.setValue(summary["expected_cash_now"])
+        self.difference = QLabel(format_rupiah(0))
+        self.notes = QLineEdit()
+        self.notes.setPlaceholderText("Catatan selisih/penutupan (opsional)")
+        form.addRow("Kas fisik saat tutup", self.closing_cash)
+        form.addRow("Selisih", self.difference)
+        form.addRow("Catatan", self.notes)
+        layout.addLayout(form)
+
+        if summary["payment_breakdown"]:
+            breakdown = " • ".join(
+                f"{row['method']}: {format_rupiah(row['amount'])}"
+                for row in summary["payment_breakdown"]
+            )
+            info = QLabel(f"Breakdown pembayaran: {breakdown}")
+            info.setWordWrap(True)
+            layout.addWidget(info)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttons.button(QDialogButtonBox.Ok).setText("Tutup Shift")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("PrimaryButton")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self.closing_cash.valueChanged.connect(self._update_difference)
+        self._update_difference()
+
+    def _update_difference(self) -> None:
+        value = self.closing_cash.value() - self.summary["expected_cash_now"]
+        sign = "+" if value > 0 else ""
+        self.difference.setText(f"{sign}{format_rupiah(value)}")
+
+
+class HoldDialog(QDialog):
+    def __init__(self, sale_service: SaleService, cashier_user_id: int, parent=None) -> None:
+        super().__init__(parent)
+        self.sale_service = sale_service
+        self.cashier_user_id = cashier_user_id
+        self.selected_hold_no: str | None = None
+        self.setWindowTitle("Transaksi Ditahan")
+        self.resize(760, 460)
+
+        layout = QVBoxLayout(self)
+        self.table = QTableWidget(0, 4)
+        self.table.setHorizontalHeaderLabels(["No. Hold", "Waktu", "Pelanggan", "Item"])
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(self.table)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        resume_button = QPushButton("Lanjutkan Transaksi")
+        resume_button.setObjectName("PrimaryButton")
+        delete_button = QPushButton("Hapus Hold")
+        delete_button.setObjectName("DangerButton")
+        buttons.addButton(resume_button, QDialogButtonBox.ActionRole)
+        buttons.addButton(delete_button, QDialogButtonBox.ActionRole)
+        layout.addWidget(buttons)
+
+        buttons.rejected.connect(self.reject)
+        resume_button.clicked.connect(self.resume_selected)
+        delete_button.clicked.connect(self.delete_selected)
+        self.table.doubleClicked.connect(self.resume_selected)
+        self.reload()
+
+    def reload(self) -> None:
+        rows = self.sale_service.list_held(self.cashier_user_id)
+        self.table.setRowCount(len(rows))
+        for row_index, item in enumerate(rows):
+            values = [
+                item["hold_no"],
+                item["created_at"],
+                item.get("customer_name") or "-",
+                item["item_count"],
+            ]
+            for col, value in enumerate(values):
+                self.table.setItem(row_index, col, QTableWidgetItem(str(value)))
+        self.table.resizeColumnsToContents()
+
+    def _current_hold_no(self) -> str | None:
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        return self.table.item(row, 0).text()
+
+    def resume_selected(self) -> None:
+        hold_no = self._current_hold_no()
+        if not hold_no:
+            QMessageBox.information(self, "Pilih Hold", "Pilih transaksi hold terlebih dahulu.")
+            return
+        self.selected_hold_no = hold_no
+        self.accept()
+
+    def delete_selected(self) -> None:
+        hold_no = self._current_hold_no()
+        if not hold_no:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Hapus Hold",
+            f"Hapus transaksi {hold_no}?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        self.sale_service.delete_held(hold_no, self.cashier_user_id)
+        self.reload()
+
+
+class SupervisorVoidDialog(QDialog):
+    def __init__(self, auth_service: AuthService, parent=None) -> None:
+        super().__init__(parent)
+        self.auth_service = auth_service
+        self.supervisor_user: dict | None = None
+        self.setWindowTitle("Otorisasi Void")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        warning = QLabel(
+            "Void akan membatalkan transaksi dan mengembalikan stok. "
+            "Masukkan akun supervisor/admin dan alasan."
+        )
+        warning.setWordWrap(True)
+        layout.addWidget(warning)
+
+        form = QFormLayout()
+        self.username = QLineEdit()
+        self.password = QLineEdit()
+        self.password.setEchoMode(QLineEdit.Password)
+        self.reason = QLineEdit()
+        self.reason.setPlaceholderText("Contoh: salah scan / transaksi duplikat")
+        form.addRow("Username supervisor", self.username)
+        form.addRow("Password", self.password)
+        form.addRow("Alasan void", self.reason)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Cancel | QDialogButtonBox.Ok)
+        buttons.button(QDialogButtonBox.Ok).setText("Otorisasi & Void")
+        buttons.button(QDialogButtonBox.Ok).setObjectName("DangerButton")
+        buttons.accepted.connect(self._validate)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _validate(self) -> None:
+        if not self.reason.text().strip():
+            QMessageBox.warning(self, "Alasan Wajib", "Alasan void wajib diisi.")
+            return
+        user = self.auth_service.authenticate_supervisor(
+            self.username.text(),
+            self.password.text(),
+        )
+        if not user:
+            QMessageBox.warning(
+                self,
+                "Otorisasi Gagal",
+                "Akun supervisor/admin atau password tidak valid.",
+            )
+            return
+        self.supervisor_user = user
+        self.accept()
 
 
 class ReceiptDialog(QDialog):
@@ -198,16 +470,25 @@ class ReceiptDialog(QDialog):
 
 
 class HistoryDialog(QDialog):
-    def __init__(self, sale_service: SaleService, receipt_service: ReceiptService, parent=None) -> None:
+    def __init__(
+        self,
+        sale_service: SaleService,
+        receipt_service: ReceiptService,
+        auth_service: AuthService,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self.sale_service = sale_service
         self.receipt_service = receipt_service
+        self.auth_service = auth_service
         self.setWindowTitle("Riwayat Transaksi")
-        self.resize(900, 540)
+        self.resize(1020, 560)
 
         layout = QVBoxLayout(self)
-        self.table = QTableWidget(0, 6)
-        self.table.setHorizontalHeaderLabels(["Invoice", "Waktu", "Kasir", "Pelanggan", "Metode", "Total"])
+        self.table = QTableWidget(0, 7)
+        self.table.setHorizontalHeaderLabels(
+            ["Invoice", "Waktu", "Kasir", "Pelanggan", "Metode", "Total", "Status"]
+        )
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.verticalHeader().setVisible(False)
@@ -217,10 +498,14 @@ class HistoryDialog(QDialog):
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         reprint = QPushButton("Lihat / Cetak Struk")
         reprint.setObjectName("PrimaryButton")
+        void_button = QPushButton("Void Transaksi")
+        void_button.setObjectName("DangerButton")
         buttons.addButton(reprint, QDialogButtonBox.ActionRole)
+        buttons.addButton(void_button, QDialogButtonBox.ActionRole)
         layout.addWidget(buttons)
         buttons.rejected.connect(self.reject)
         reprint.clicked.connect(self.open_receipt)
+        void_button.clicked.connect(self.void_selected)
         self.table.doubleClicked.connect(self.open_receipt)
         self.reload()
 
@@ -235,15 +520,48 @@ class HistoryDialog(QDialog):
                 sale.get("customer_name") or "-",
                 sale["payment_method"],
                 format_rupiah(sale["grand_total"]),
+                sale["status"],
             ]
             for col, value in enumerate(values):
                 self.table.setItem(row_index, col, QTableWidgetItem(str(value)))
         self.table.resizeColumnsToContents()
 
-    def open_receipt(self) -> None:
+    def _current_invoice(self) -> str | None:
         row = self.table.currentRow()
         if row < 0:
+            return None
+        return self.table.item(row, 0).text()
+
+    def open_receipt(self) -> None:
+        invoice = self._current_invoice()
+        if not invoice:
             return
-        invoice = self.table.item(row, 0).text()
         sale = self.sale_service.get_sale(invoice)
         ReceiptDialog(sale, self.receipt_service, self).exec()
+
+    def void_selected(self) -> None:
+        invoice = self._current_invoice()
+        if not invoice:
+            QMessageBox.information(self, "Pilih Transaksi", "Pilih transaksi terlebih dahulu.")
+            return
+        sale = self.sale_service.get_sale(invoice)
+        if sale["status"] != "COMPLETED":
+            QMessageBox.information(self, "Tidak Dapat Void", "Transaksi ini sudah di-void.")
+            return
+
+        dialog = SupervisorVoidDialog(self.auth_service, self)
+        if not dialog.exec() or not dialog.supervisor_user:
+            return
+
+        try:
+            self.sale_service.void_sale(
+                invoice,
+                dialog.supervisor_user["id"],
+                dialog.reason.text(),
+            )
+        except ValueError as exc:
+            QMessageBox.critical(self, "Void Gagal", str(exc))
+            return
+
+        QMessageBox.information(self, "Void Berhasil", f"Transaksi {invoice} berhasil di-void.")
+        self.reload()
