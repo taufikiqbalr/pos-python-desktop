@@ -1,0 +1,2 @@
+python-escpos>=3,<4
+pyusb>=1.2,<2
