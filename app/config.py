@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 import socket
+import sys
 
 
 def env_bool(name: str, default: bool = False) -> bool:
@@ -29,10 +30,16 @@ CURRENCY_SYMBOL = "Rp"
 TAX_PERCENT = float(os.getenv("POS_TAX_PERCENT", "0"))
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.getenv("POS_DATA_DIR", BASE_DIR / "data"))
+if getattr(sys, "frozen", False):
+    _local_app_data = Path(os.getenv("LOCALAPPDATA", Path.home()))
+    DEFAULT_RUNTIME_DIR = _local_app_data / "KoperasiBRIN-POS"
+else:
+    DEFAULT_RUNTIME_DIR = BASE_DIR
+
+DATA_DIR = Path(os.getenv("POS_DATA_DIR", DEFAULT_RUNTIME_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_PATH = Path(os.getenv("POS_DB_PATH", DATA_DIR / "pos.db"))
-RECEIPT_DIR = Path(os.getenv("POS_RECEIPT_DIR", BASE_DIR / "receipts"))
+RECEIPT_DIR = Path(os.getenv("POS_RECEIPT_DIR", DEFAULT_RUNTIME_DIR / "receipts"))
 RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
 
 # ESC/POS hardware configuration.
