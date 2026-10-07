@@ -2,8 +2,14 @@ import sys
 
 from PySide6.QtWidgets import QApplication
 
+from app.config import (
+    INTEGRATION_FALLBACK_LOCAL,
+    INVENTORY_API_URL,
+    MEMBERSHIP_API_URL,
+)
 from app.database import Database
 from app.hardware import EscPosHardwareService
+from app.integrations.clients import InventoryApiClient, MembershipApiClient
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import AuthService, CatalogService, ReceiptService, SaleService, ShiftService
 from app.sync import SyncService
@@ -19,11 +25,24 @@ def main() -> int:
     db = Database()
     db.initialize()
 
+    inventory_api = InventoryApiClient(INVENTORY_API_URL) if INVENTORY_API_URL else None
+    membership_api = (
+        MembershipApiClient(MEMBERSHIP_API_URL) if MEMBERSHIP_API_URL else None
+    )
+
     auth_service = AuthService(db)
-    catalog_service = CatalogService(db)
+    catalog_service = CatalogService(
+        db,
+        inventory_api=inventory_api,
+        fallback_local=INTEGRATION_FALLBACK_LOCAL,
+    )
     sale_service = SaleService(db)
     shift_service = ShiftService(db)
-    customer_service = CustomerService(db)
+    customer_service = CustomerService(
+        db,
+        membership_api=membership_api,
+        fallback_local=INTEGRATION_FALLBACK_LOCAL,
+    )
     cash_movement_service = CashMovementService(db)
     refund_service = RefundService(db)
     audit_service = AuditService(db)
