@@ -22,8 +22,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app.config import TAX_PERCENT, format_rupiah
+from app.config import (
+    AUTO_OPEN_DRAWER_CASH,
+    AUTO_PRINT_RECEIPT,
+    TAX_PERCENT,
+    format_rupiah,
+)
 from app.domain import Cart, Product
+from app.hardware import EscPosHardwareService, HardwareError
+from app.identity import TERMINAL_IDENTITY
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import (
     AuthService,
@@ -32,6 +39,8 @@ from app.services import (
     SaleService,
     ShiftService,
 )
+from app.sync import SyncService
+from app.ui.device_dialog import DeviceDialog
 from app.ui.dialogs import (
     CloseShiftDialog,
     HistoryDialog,
@@ -62,6 +71,8 @@ class PosWindow(QMainWindow):
         refund_service: RefundService,
         audit_service: AuditService,
         receipt_service: ReceiptService,
+        hardware_service: EscPosHardwareService,
+        sync_service: SyncService,
         on_logout,
     ) -> None:
         super().__init__()
@@ -75,6 +86,8 @@ class PosWindow(QMainWindow):
         self.refund_service = refund_service
         self.audit_service = audit_service
         self.receipt_service = receipt_service
+        self.hardware_service = hardware_service
+        self.sync_service = sync_service
         self.on_logout = on_logout
         self.cart = Cart(tax_percent=TAX_PERCENT)
         self.selected_customer: dict | None = None
@@ -103,6 +116,7 @@ class PosWindow(QMainWindow):
         self.shift_label.setObjectName("Subtitle")
         self.shift_button = QPushButton()
         history_button = QPushButton("Riwayat (F8)")
+        device_button = QPushButton("Perangkat (F12)")
         cash_button = QPushButton("Kas (F10)")
         refund_button = QPushButton("Refund (F11)")
         new_button = QPushButton("Transaksi Baru (F6)")
@@ -110,10 +124,16 @@ class PosWindow(QMainWindow):
         header.addWidget(title)
         header.addStretch()
         header.addWidget(user_label)
+        terminal_label = QLabel(
+            f"{TERMINAL_IDENTITY.store_id}/{TERMINAL_IDENTITY.register_id}"
+        )
+        terminal_label.setObjectName("Subtitle")
+        header.addWidget(terminal_label)
         header.addSpacing(10)
         header.addWidget(self.shift_label)
         header.addWidget(self.shift_button)
         header.addWidget(history_button)
+        header.addWidget(device_button)
         header.addWidget(cash_button)
         header.addWidget(refund_button)
         header.addWidget(new_button)
@@ -228,7 +248,7 @@ class PosWindow(QMainWindow):
         body.addWidget(right, 1)
 
         self.statusBar().showMessage(
-            "F2 Scan • F3 Cari • F4 Bayar • F5 Hold • F6 Baru • F7 Hold • F8 Riwayat • F9 Shift • F10 Kas • F11 Refund"
+            "F2 Scan • F3 Cari • F4 Bayar • F5 Hold • F6 Baru • F7 Hold • F8 Riwayat • F9 Shift • F10 Kas • F11 Refund • F12 Perangkat"
         )
 
         self.scan_input.returnPressed.connect(self.scan_code)
@@ -243,6 +263,7 @@ class PosWindow(QMainWindow):
         self.pay_button.clicked.connect(self.checkout)
         new_button.clicked.connect(self.new_sale)
         history_button.clicked.connect(self.open_history)
+        device_button.clicked.connect(self.open_device_dialog)
         cash_button.clicked.connect(self.open_cash_movement)
         refund_button.clicked.connect(self.open_refund)
         member_button.clicked.connect(self.search_customer)
@@ -261,6 +282,7 @@ class PosWindow(QMainWindow):
             ("F9", self.manage_shift),
             ("F10", self.open_cash_movement),
             ("F11", self.open_refund),
+            ("F12", self.open_device_dialog),
         ]
         self._shortcuts = []
         for key, handler in shortcuts:
@@ -399,6 +421,13 @@ class PosWindow(QMainWindow):
                 f"{refund['refund_no']} berhasil diproses sebesar "
                 f"{format_rupiah(refund['total_amount'])}.",
             )
+
+    def open_device_dialog(self) -> None:
+        DeviceDialog(
+            hardware_service=self.hardware_service,
+            sync_service=self.sync_service,
+            parent=self,
+        ).exec()
 
     def focus_scan(self) -> None:
         self.scan_input.setFocus()
@@ -662,12 +691,41 @@ class PosWindow(QMainWindow):
             return
 
         self.receipt_service.save_text(sale)
-        QMessageBox.information(
-            self,
-            "Transaksi Berhasil",
-            f"Transaksi {sale['invoice_no']} berhasil disimpan.",
+
+        hardware_warnings = []
+        if AUTO_PRINT_RECEIPT and self.hardware_service.printer_enabled:
+            try:
+                self.hardware_service.print_sale(sale, self.receipt_service)
+            except HardwareError as exc:
+                hardware_warnings.append(f"Auto print gagal: {exc}")
+
+        uses_cash = any(
+            payment.get("method") == "Tunai"
+            for payment in sale.get("payments", [])
         )
-        ReceiptDialog(sale, self.receipt_service, self).exec()
+        if (
+            uses_cash
+            and AUTO_OPEN_DRAWER_CASH
+            and self.hardware_service.drawer_enabled
+        ):
+            try:
+                self.hardware_service.open_cash_drawer()
+            except HardwareError as exc:
+                hardware_warnings.append(f"Cash drawer gagal: {exc}")
+
+        message = f"Transaksi {sale['invoice_no']} berhasil disimpan."
+        if hardware_warnings:
+            message += "\n\n" + "\n".join(hardware_warnings)
+            QMessageBox.warning(self, "Transaksi Berhasil - Perangkat", message)
+        else:
+            QMessageBox.information(self, "Transaksi Berhasil", message)
+
+        ReceiptDialog(
+            sale,
+            self.receipt_service,
+            self,
+            hardware_service=self.hardware_service,
+        ).exec()
         self.reset_form()
 
     def reset_form(self) -> None:
@@ -698,6 +756,7 @@ class PosWindow(QMainWindow):
             self.receipt_service,
             self.auth_service,
             self,
+            hardware_service=self.hardware_service,
         ).exec()
 
     def logout(self) -> None:
