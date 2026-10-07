@@ -119,7 +119,28 @@ Request:
 }
 ```
 
-Pricing engine nantinya dapat mengembalikan promo, member price, voucher, dan discount entitlement. POS sebaiknya tidak membuat aturan promo kompleks sendiri.
+Response:
+
+```json
+{
+  "data": {
+    "quote_id": "Q-20261007-001",
+    "line_discounts": [
+      {
+        "sku": "BRIN-MG-001",
+        "discount_percent": 10,
+        "reason": "Member promo"
+      }
+    ],
+    "cart_discount_percent": 5,
+    "messages": [
+      "Promo anggota diterapkan"
+    ]
+  }
+}
+```
+
+PoS hanya menerapkan `discount_percent` yang dikembalikan Pricing API. Nilai di luar 0–100 ditolak. Tombol **Cek Promo** tidak aktif jika Pricing API belum dikonfigurasi. Dengan demikian aturan promo/member price/voucher tetap server-authoritative, bukan hard-coded pada desktop client.
 
 ## 4. POS Event Sync API
 
