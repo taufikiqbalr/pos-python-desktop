@@ -1,1 +1,28 @@
-name: Build Windows POS\n\non:\n  workflow_dispatch:\n  push:\n    tags:\n      - "v*"\n\njobs:\n  build-windows:\n    runs-on: windows-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-python@v5\n        with:\n          python-version: "3.12"\n\n      - name: Build Windows executable\n        shell: pwsh\n        run: ./scripts/build_windows.ps1\n\n      - name: Upload executable\n        uses: actions/upload-artifact@v4\n        with:\n          name: KoperasiBRIN-POS-windows\n          path: dist/KoperasiBRIN-POS.exe\n          if-no-files-found: error\n
+name: Build Windows POS
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build Windows executable
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: KoperasiBRIN-POS-windows
+          path: dist/KoperasiBRIN-POS.exe
+          if-no-files-found: error
