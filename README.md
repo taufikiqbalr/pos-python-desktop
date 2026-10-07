@@ -4,7 +4,7 @@ Aplikasi Point of Sales (PoS) desktop untuk kasir toko, dibangun dengan **Python
 
 ## Status
 
-**Operational Cashier MVP — Production Controls Phase 2**
+**Operational Cashier MVP — Phase 3 Hardware, Deployment & Integration Ready**
 
 Alur inti yang sudah didukung:
 
@@ -89,6 +89,62 @@ Critical cashier events disimpan pada tabel `audit_events`, antara lain:
 - cash in / cash out.
 
 Audit event menyimpan actor/user, jenis aksi, entity, waktu, dan metadata terkait.
+
+### Terminal identity
+
+Setiap terminal memiliki identitas:
+
+- `POS_STORE_ID`
+- `POS_REGISTER_ID`
+- `POS_DEVICE_ID`
+
+Identitas disimpan pada shift/transaksi/refund/cash movement dan ikut dalam integration outbox. Ini memungkinkan transaksi ditelusuri sampai store, register, dan perangkat asal.
+
+### Thermal printer ESC/POS & cash drawer
+
+- Dukungan printer ESC/POS bersifat opsional.
+- Mode printer:
+  - `disabled`
+  - `network` (umumnya TCP port 9100)
+  - `usb`
+- Qt/Windows print dialog tetap menjadi fallback.
+- Test printer dan test cash drawer tersedia melalui **F12 Perangkat**.
+- Auto-print setelah checkout dapat diaktifkan.
+- Cash drawer dapat otomatis terbuka hanya untuk transaksi yang memiliki komponen pembayaran tunai.
+- Kegagalan printer/cash drawer **tidak membatalkan transaksi yang sudah tersimpan**.
+
+Install dependency hardware:
+
+```bash
+pip install -r requirements-hardware.txt
+```
+
+### Offline integration outbox
+
+Operasi finansial tetap local-first. Event integrasi disimpan pada tabel `integration_outbox` dalam transaction lokal yang sama.
+
+Event saat ini:
+
+- `shift.opened`
+- `shift.closed`
+- `sale.completed`
+- `sale.voided`
+- `refund.completed`
+- `cash.in`
+- `cash.out`
+
+Menu **F12 Perangkat** menampilkan pending sync dan menyediakan **Sync Sekarang**. Backend menerima event pada `POST /api/v1/pos/events` dengan `Idempotency-Key`.
+
+### Inventory & Membership API cache
+
+Jika URL API dikonfigurasi, lookup menjadi **remote-first**:
+
+- Inventory API -> cache tabel `products`.
+- Membership API -> cache tabel `customers`.
+
+Jika backend tidak tersedia dan `POS_INTEGRATION_FALLBACK_LOCAL=true`, aplikasi memakai cache SQLite lokal.
+
+Kontrak endpoint lengkap: `docs/integration-contract.md`.
 
 ### Scan, pencarian, dan cart
 
@@ -176,6 +232,7 @@ Untuk menjaga integritas settlement, transaksi yang berasal dari **shift yang su
 | `F9` | Buka / tutup shift |
 | `F10` | Cash in / cash out |
 | `F11` | Return / refund |
+| `F12` | Perangkat, printer, cash drawer & sync |
 
 ## Arsitektur
 
@@ -277,11 +334,43 @@ Contoh barcode demo:
 
 ```env
 POS_STORE_NAME=Toko Koperasi BRIN
-POS_STORE_ADDRESS=Badan Riset dan Inovasi Nasional
-POS_STORE_PHONE=-
-POS_TAX_PERCENT=0
-POS_DB_PATH=/path/to/pos.db
-POS_RECEIPT_DIR=/path/to/receipts
+POS_STORE_ID=BRIN-STORE-001
+POS_REGISTER_ID=REG-01
+POS_DEVICE_ID=POS-KASIR-01
+
+POS_PRINTER_MODE=disabled
+POS_AUTO_PRINT_RECEIPT=false
+POS_CASH_DRAWER_ENABLED=false
+
+POS_SYNC_ENABLED=false
+POS_SYNC_API_URL=
+POS_INVENTORY_API_URL=
+POS_MEMBERSHIP_API_URL=
+```
+
+Lihat seluruh opsi pada `.env.example`.
+
+## Build Windows executable
+
+Build lokal pada Windows:
+
+```powershell
+./scripts/build_windows.ps1
+```
+
+Output:
+
+```text
+dist/KoperasiBRIN-POS.exe
+```
+
+GitHub workflow `.github/workflows/build-windows.yml` dapat dijalankan manual dan otomatis ketika tag `v*` dibuat. Artifact build bernama `KoperasiBRIN-POS-windows`.
+
+Pada build PyInstaller, data runtime tidak disimpan di folder temporary executable. Default persistence Windows:
+
+```text
+%LOCALAPPDATA%\KoperasiBRIN-POS\data\pos.db
+%LOCALAPPDATA%\KoperasiBRIN-POS\receipts\
 ```
 
 ## Test dan CI
@@ -325,17 +414,16 @@ Integration target:
 
 ## Fitur berikutnya sebelum production rollout
 
-Fitur berikutnya setelah Production Controls Phase 2:
+Fitur berikutnya setelah Phase 3:
 
-- integrasi Membership API Koperasi untuk menggantikan data anggota lokal;
+- implementasi server-side consumer untuk event outbox;
 - pricing/promotion engine untuk harga anggota, voucher, dan promo;
-- ESC/POS thermal printer adapter dan cash-drawer trigger;
-- store/register/device identity;
-- offline sync queue ke backend pusat;
+- server-authoritative stock reservation/movement;
+- User Management/IAM API dan granular permission;
 - database backup/restore;
 - konfigurasi hak diskon maksimum per role;
 - refund receipt khusus dan digital receipt/QR code;
-- integrasi Inventory API untuk stock reservation dan movement;
-- packaging Windows (.exe/MSI) serta auto-update.
+- MSI installer, code signing dan auto-update;
+- observability/log shipping untuk banyak register.
 
 Inventory master, stock opname, purchase/receiving, supplier, dan user administration **tidak** dimasukkan ke repository ini.
