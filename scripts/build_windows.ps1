@@ -1,1 +1,14 @@
-$ErrorActionPreference = "Stop"\n\npython -m pip install --upgrade pip\npython -m pip install -r requirements.txt\npython -m pip install -r requirements-hardware.txt\npython -m pip install -r requirements-build.txt\n\npython -m compileall -q app main.py tests\npython -m unittest discover -s tests -v\n\npyinstaller --noconfirm --clean --onefile --windowed --name "KoperasiBRIN-POS" --collect-all escpos main.py\n\nWrite-Host ""\nWrite-Host "Build selesai: dist\\KoperasiBRIN-POS.exe"\n
+$ErrorActionPreference = "Stop"
+
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+python -m pip install -r requirements-hardware.txt
+python -m pip install -r requirements-build.txt
+
+python -m compileall -q app main.py tests
+python -m unittest discover -s tests -v
+
+pyinstaller --noconfirm --clean --onefile --windowed --name "KoperasiBRIN-POS" --collect-all escpos main.py
+
+Write-Host ""
+Write-Host "Build selesai: dist\KoperasiBRIN-POS.exe"
