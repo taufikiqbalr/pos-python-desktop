@@ -3,8 +3,16 @@ name: Build Windows POS
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "main"
     tags:
       - "v*"
+    paths:
+      - ".github/workflows/build-windows.yml"
+      - "scripts/build_windows.ps1"
+      - "requirements.txt"
+      - "requirements-hardware.txt"
+      - "requirements-build.txt"
 
 jobs:
   build-windows:
