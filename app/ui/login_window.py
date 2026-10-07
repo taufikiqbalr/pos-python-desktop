@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from app.hardware import EscPosHardwareService
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
+from app.pricing import PricingService
 from app.services import (
     AuthService,
     CatalogService,
@@ -37,6 +38,7 @@ class LoginWindow(QMainWindow):
         cash_movement_service: CashMovementService,
         refund_service: RefundService,
         audit_service: AuditService,
+        pricing_service: PricingService,
         receipt_service: ReceiptService,
         hardware_service: EscPosHardwareService,
         sync_service: SyncService,
@@ -50,6 +52,7 @@ class LoginWindow(QMainWindow):
         self.cash_movement_service = cash_movement_service
         self.refund_service = refund_service
         self.audit_service = audit_service
+        self.pricing_service = pricing_service
         self.receipt_service = receipt_service
         self.hardware_service = hardware_service
         self.sync_service = sync_service
@@ -138,6 +141,7 @@ class LoginWindow(QMainWindow):
             cash_movement_service=self.cash_movement_service,
             refund_service=self.refund_service,
             audit_service=self.audit_service,
+            pricing_service=self.pricing_service,
             receipt_service=self.receipt_service,
             hardware_service=self.hardware_service,
             sync_service=self.sync_service,
