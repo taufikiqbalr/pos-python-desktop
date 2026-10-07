@@ -11,6 +11,7 @@ from app.config import RECEIPT_DIR, STORE_ADDRESS, STORE_NAME, STORE_PHONE, form
 from app.database import Database
 from app.domain import Cart, Product
 from app.identity import TERMINAL_IDENTITY
+from app.integrations.clients import IntegrationError, InventoryApiClient
 from app.security import verify_password
 from app.sync import enqueue_outbox
 
@@ -38,8 +39,49 @@ class AuthService:
 
 
 class CatalogService:
-    def __init__(self, db: Database) -> None:
+    def __init__(
+        self,
+        db: Database,
+        inventory_api: InventoryApiClient | None = None,
+        fallback_local: bool = True,
+    ) -> None:
         self.db = db
+        self.inventory_api = inventory_api
+        self.fallback_local = fallback_local
+
+    def _cache_remote_product(self, data: dict) -> Product:
+        try:
+            sku = str(data["sku"]).strip()
+            barcode = str(data["barcode"]).strip()
+            name = str(data["name"]).strip()
+            unit = str(data.get("unit") or "pcs").strip()
+            price = int(data["price"])
+            stock = float(data.get("stock", 0))
+            active = 1 if data.get("active", True) else 0
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IntegrationError("Payload produk inventory tidak lengkap/valid") from exc
+
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO products(sku, barcode, name, unit, price, stock, active)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(sku) DO UPDATE SET
+                    barcode=excluded.barcode,
+                    name=excluded.name,
+                    unit=excluded.unit,
+                    price=excluded.price,
+                    stock=excluded.stock,
+                    active=excluded.active,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (sku, barcode, name, unit, price, stock, active),
+            )
+            row = conn.execute(
+                "SELECT * FROM products WHERE sku=?",
+                (sku,),
+            ).fetchone()
+        return self._to_product(row)
 
     @staticmethod
     def _to_product(row) -> Product:
@@ -56,6 +98,15 @@ class CatalogService:
 
     def get_by_barcode_or_sku(self, code: str) -> Product | None:
         code = code.strip()
+        if self.inventory_api and code:
+            try:
+                remote = self.inventory_api.lookup_product(code)
+                if remote:
+                    return self._cache_remote_product(remote)
+            except IntegrationError:
+                if not self.fallback_local:
+                    raise
+
         with self.db.connect() as conn:
             row = conn.execute(
                 """
@@ -77,6 +128,15 @@ class CatalogService:
 
     def search(self, term: str = "", limit: int = 100) -> list[Product]:
         term = term.strip()
+        if self.inventory_api:
+            try:
+                remote_rows = self.inventory_api.search_products(term, limit)
+                if remote_rows:
+                    return [self._cache_remote_product(row) for row in remote_rows]
+            except IntegrationError:
+                if not self.fallback_local:
+                    raise
+
         like = f"%{term}%"
         with self.db.connect() as conn:
             rows = conn.execute(
