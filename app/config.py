@@ -53,6 +53,14 @@ SYNC_API_URL = os.getenv("POS_SYNC_API_URL", "").rstrip("/")
 SYNC_API_TOKEN = os.getenv("POS_SYNC_API_TOKEN", "")
 SYNC_TIMEOUT_SECONDS = float(os.getenv("POS_SYNC_TIMEOUT_SECONDS", "5"))
 
+# Optional upstream business services. When unset, local SQLite adapters are used.
+INVENTORY_API_URL = os.getenv("POS_INVENTORY_API_URL", "").rstrip("/")
+MEMBERSHIP_API_URL = os.getenv("POS_MEMBERSHIP_API_URL", "").rstrip("/")
+PRICING_API_URL = os.getenv("POS_PRICING_API_URL", "").rstrip("/")
+BUSINESS_API_TOKEN = os.getenv("POS_BUSINESS_API_TOKEN", "")
+BUSINESS_API_TIMEOUT_SECONDS = float(os.getenv("POS_BUSINESS_API_TIMEOUT_SECONDS", "4"))
+INTEGRATION_FALLBACK_LOCAL = env_bool("POS_INTEGRATION_FALLBACK_LOCAL", True)
+
 
 def format_rupiah(value: int | float) -> str:
     value = int(round(value))
