@@ -146,6 +146,14 @@ Jika backend tidak tersedia dan `POS_INTEGRATION_FALLBACK_LOCAL=true`, aplikasi 
 
 Kontrak endpoint lengkap: `docs/integration-contract.md`.
 
+### Pricing / promo anggota
+
+- Jika `POS_PRICING_API_URL` tersedia, tombol **Cek Promo** diaktifkan.
+- Pricing API menerima member number, store ID, SKU, qty, dan base price.
+- Backend mengembalikan `quote_id`, diskon per SKU, diskon transaksi, dan pesan promo.
+- PoS menolak discount percentage di luar 0–100.
+- Tidak ada hard-coded member discount pada client; business rule tetap server-authoritative.
+
 ### Scan, pencarian, dan cart
 
 - Scan barcode menggunakan barcode scanner USB keyboard-wedge.
@@ -417,7 +425,7 @@ Integration target:
 Fitur berikutnya setelah Phase 3:
 
 - implementasi server-side consumer untuk event outbox;
-- pricing/promotion engine untuk harga anggota, voucher, dan promo;
+- perluasan pricing engine untuk voucher/coupon redemption dan stacking policy;
 - server-authoritative stock reservation/movement;
 - User Management/IAM API dan granular permission;
 - database backup/restore;
