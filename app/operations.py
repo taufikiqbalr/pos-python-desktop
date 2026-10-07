@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 
 from app.audit import write_audit
 from app.database import Database
+from app.identity import TERMINAL_IDENTITY
+from app.sync import enqueue_outbox
 
 
 def _money(value: Decimal) -> int:
@@ -156,13 +157,16 @@ class CashMovementService:
             cur = conn.execute(
                 """
                 INSERT INTO cash_movements(
-                    shift_id, cashier_user_id, approved_by,
-                    movement_type, amount, reason
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    shift_id, cashier_user_id, store_id, register_id, device_id,
+                    approved_by, movement_type, amount, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     shift_id,
                     cashier_user_id,
+                    TERMINAL_IDENTITY.store_id,
+                    TERMINAL_IDENTITY.register_id,
+                    TERMINAL_IDENTITY.device_id,
                     approved_by,
                     movement_type,
                     amount,
@@ -181,6 +185,20 @@ class CashMovementService:
                     "amount": amount,
                     "reason": reason,
                     "approved_by": approved_by,
+                },
+            )
+            enqueue_outbox(
+                conn,
+                event_type=f"cash.{movement_type.lower()}",
+                aggregate_type="cash_movement",
+                aggregate_id=movement_id,
+                payload={
+                    "shift_id": shift_id,
+                    "cashier_user_id": cashier_user_id,
+                    "approved_by": approved_by,
+                    "movement_type": movement_type,
+                    "amount": amount,
+                    "reason": reason,
                 },
             )
             row = conn.execute(
@@ -495,14 +513,18 @@ class RefundService:
             cur = conn.execute(
                 """
                 INSERT INTO refunds(
-                    refund_no, original_sale_id, cashier_user_id, shift_id,
+                    refund_no, original_sale_id, cashier_user_id,
+                    store_id, register_id, device_id, shift_id,
                     approved_by, refund_method, total_amount, reason
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     refund_no,
                     sale["id"],
                     cashier_user_id,
+                    TERMINAL_IDENTITY.store_id,
+                    TERMINAL_IDENTITY.register_id,
+                    TERMINAL_IDENTITY.device_id,
                     shift_id,
                     approved_by,
                     refund_method,
@@ -554,6 +576,23 @@ class RefundService:
                 },
             )
 
+            enqueue_outbox(
+                conn,
+                event_type="refund.completed",
+                aggregate_type="refund",
+                aggregate_id=refund_no,
+                payload={
+                    "refund_no": refund_no,
+                    "invoice_no": invoice_no,
+                    "cashier_user_id": cashier_user_id,
+                    "approved_by": approved_by,
+                    "shift_id": shift_id,
+                    "refund_method": refund_method,
+                    "total_amount": total_amount,
+                    "reason": reason,
+                    "items": selected_lines,
+                },
+            )
             row = conn.execute(
                 """
                 SELECT r.*, s.invoice_no, u.full_name AS cashier_name,
