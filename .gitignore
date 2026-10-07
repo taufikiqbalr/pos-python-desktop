@@ -10,3 +10,6 @@ venv/
 .DS_Store
 receipts/*.txt
 !receipts/.gitkeep
+build/
+dist/
+*.spec
