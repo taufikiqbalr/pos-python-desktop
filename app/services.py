@@ -10,7 +10,9 @@ from app.audit import write_audit
 from app.config import RECEIPT_DIR, STORE_ADDRESS, STORE_NAME, STORE_PHONE, format_rupiah
 from app.database import Database
 from app.domain import Cart, Product
+from app.identity import TERMINAL_IDENTITY
 from app.security import verify_password
+from app.sync import enqueue_outbox
 
 
 class AuthService:
@@ -113,8 +115,18 @@ class ShiftService:
             raise ValueError("Kasir masih memiliki shift yang aktif")
         with self.db.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO shifts(cashier_user_id, opening_cash) VALUES (?, ?)",
-                (cashier_user_id, opening_cash),
+                """
+                INSERT INTO shifts(
+                    cashier_user_id, store_id, register_id, device_id, opening_cash
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    cashier_user_id,
+                    TERMINAL_IDENTITY.store_id,
+                    TERMINAL_IDENTITY.register_id,
+                    TERMINAL_IDENTITY.device_id,
+                    opening_cash,
+                ),
             )
             shift_id = cur.lastrowid
             write_audit(
@@ -124,6 +136,16 @@ class ShiftService:
                 entity_type="shift",
                 entity_id=shift_id,
                 metadata={"opening_cash": opening_cash},
+            )
+            enqueue_outbox(
+                conn,
+                event_type="shift.opened",
+                aggregate_type="shift",
+                aggregate_id=shift_id,
+                payload={
+                    "cashier_user_id": cashier_user_id,
+                    "opening_cash": opening_cash,
+                },
             )
             row = conn.execute("SELECT * FROM shifts WHERE id=?", (shift_id,)).fetchone()
         return dict(row)
@@ -267,6 +289,23 @@ class ShiftService:
                     "notes": notes.strip(),
                 },
             )
+            enqueue_outbox(
+                conn,
+                event_type="shift.closed",
+                aggregate_type="shift",
+                aggregate_id=shift_id,
+                payload={
+                    "cashier_user_id": int(summary["cashier_user_id"]),
+                    "expected_cash": expected,
+                    "closing_cash": closing_cash,
+                    "cash_difference": difference,
+                    "sales_total": summary["sales_total"],
+                    "refund_total": summary["refund_total"],
+                    "net_sales_total": summary["net_sales_total"],
+                    "cash_in": summary["cash_in"],
+                    "cash_out": summary["cash_out"],
+                },
+            )
         result = self.summary(shift_id)
         result["closing_cash"] = closing_cash
         result["cash_difference"] = difference
@@ -375,15 +414,18 @@ class SaleService:
             sale_cur = conn.execute(
                 """
                 INSERT INTO sales(
-                    invoice_no, cashier_user_id, shift_id, customer_id,
-                    customer_member_no, customer_name, subtotal,
+                    invoice_no, cashier_user_id, store_id, register_id, device_id,
+                    shift_id, customer_id, customer_member_no, customer_name, subtotal,
                     discount_total, tax_total, grand_total, payment_method,
                     paid_amount, change_amount, notes, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED')
                 """,
                 (
                     invoice_no,
                     cashier_user_id,
+                    TERMINAL_IDENTITY.store_id,
+                    TERMINAL_IDENTITY.register_id,
+                    TERMINAL_IDENTITY.device_id,
                     shift_id,
                     customer_id,
                     resolved_member_no,
@@ -452,6 +494,38 @@ class SaleService:
                     "payment_method": method_summary,
                     "shift_id": shift_id,
                     "customer_member_no": resolved_member_no,
+                },
+            )
+            enqueue_outbox(
+                conn,
+                event_type="sale.completed",
+                aggregate_type="sale",
+                aggregate_id=invoice_no,
+                payload={
+                    "invoice_no": invoice_no,
+                    "cashier_user_id": cashier_user_id,
+                    "shift_id": shift_id,
+                    "customer_member_no": resolved_member_no,
+                    "customer_name": resolved_customer_name,
+                    "subtotal": cart.subtotal,
+                    "discount_total": cart.discount_total,
+                    "tax_total": cart.tax_total,
+                    "grand_total": cart.grand_total,
+                    "payments": normalized_payments,
+                    "change_amount": computed_change,
+                    "items": [
+                        {
+                            "product_id": line.product.id,
+                            "sku": line.product.sku,
+                            "barcode": line.product.barcode,
+                            "name": line.product.name,
+                            "qty": line.qty,
+                            "unit_price": line.product.price,
+                            "discount_amount": line.discount_amount,
+                            "line_total": line.total,
+                        }
+                        for line in cart.lines
+                    ],
                 },
             )
 
@@ -724,6 +798,17 @@ class SaleService:
                 entity_id=invoice_no,
                 metadata={"reason": reason},
             )
+            enqueue_outbox(
+                conn,
+                event_type="sale.voided",
+                aggregate_type="sale",
+                aggregate_id=invoice_no,
+                payload={
+                    "invoice_no": invoice_no,
+                    "supervisor_user_id": supervisor_user_id,
+                    "reason": reason,
+                },
+            )
 
         return self.get_sale(invoice_no)
 
@@ -742,6 +827,7 @@ class ReceiptService:
             f"No: {sale['invoice_no']}",
             f"Waktu: {sale['created_at']}",
             f"Kasir: {sale['cashier_name']}",
+            f"Store/Register: {sale.get('store_id') or TERMINAL_IDENTITY.store_id}/{sale.get('register_id') or TERMINAL_IDENTITY.register_id}",
         ]
         if sale.get("status") == "VOIDED":
             lines.append("*** TRANSAKSI VOID ***".center(width))
