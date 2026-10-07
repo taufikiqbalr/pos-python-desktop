@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from app.config import format_rupiah
 from app.domain import Product
+from app.hardware import EscPosHardwareService, HardwareError
 from app.services import AuthService, CatalogService, ReceiptService, SaleService
 
 
@@ -444,10 +445,17 @@ class SupervisorVoidDialog(QDialog):
 
 
 class ReceiptDialog(QDialog):
-    def __init__(self, sale: dict, receipt_service: ReceiptService, parent=None) -> None:
+    def __init__(
+        self,
+        sale: dict,
+        receipt_service: ReceiptService,
+        parent=None,
+        hardware_service: EscPosHardwareService | None = None,
+    ) -> None:
         super().__init__(parent)
         self.sale = sale
         self.receipt_service = receipt_service
+        self.hardware_service = hardware_service
         self.setWindowTitle(f"Struk {sale['invoice_no']}")
         self.resize(500, 650)
 
@@ -457,17 +465,23 @@ class ReceiptDialog(QDialog):
         layout.addWidget(self.viewer)
 
         row = QHBoxLayout()
-        print_button = QPushButton("Cetak")
+        print_button = QPushButton("Cetak Windows")
+        thermal_button = QPushButton("Cetak Thermal")
         save_button = QPushButton("Simpan TXT")
         close_button = QPushButton("Tutup")
         print_button.setObjectName("PrimaryButton")
+        thermal_button.setEnabled(
+            bool(self.hardware_service and self.hardware_service.printer_enabled)
+        )
         row.addWidget(print_button)
+        row.addWidget(thermal_button)
         row.addWidget(save_button)
         row.addStretch()
         row.addWidget(close_button)
         layout.addLayout(row)
 
         print_button.clicked.connect(self.print_receipt)
+        thermal_button.clicked.connect(self.print_thermal)
         save_button.clicked.connect(self.save_receipt)
         close_button.clicked.connect(self.accept)
 
@@ -478,6 +492,16 @@ class ReceiptDialog(QDialog):
             doc = QTextDocument()
             doc.setHtml(self.receipt_service.render_html(self.sale))
             doc.print_(printer)
+
+    def print_thermal(self) -> None:
+        if not self.hardware_service:
+            return
+        try:
+            self.hardware_service.print_sale(self.sale, self.receipt_service)
+        except HardwareError as exc:
+            QMessageBox.warning(self, "Printer Thermal", str(exc))
+            return
+        QMessageBox.information(self, "Printer Thermal", "Struk berhasil dikirim ke printer.")
 
     def save_receipt(self) -> None:
         path = self.receipt_service.save_text(self.sale)
@@ -491,11 +515,13 @@ class HistoryDialog(QDialog):
         receipt_service: ReceiptService,
         auth_service: AuthService,
         parent=None,
+        hardware_service: EscPosHardwareService | None = None,
     ) -> None:
         super().__init__(parent)
         self.sale_service = sale_service
         self.receipt_service = receipt_service
         self.auth_service = auth_service
+        self.hardware_service = hardware_service
         self.setWindowTitle("Riwayat Transaksi")
         self.resize(1020, 560)
 
@@ -552,7 +578,12 @@ class HistoryDialog(QDialog):
         if not invoice:
             return
         sale = self.sale_service.get_sale(invoice)
-        ReceiptDialog(sale, self.receipt_service, self).exec()
+        ReceiptDialog(
+            sale,
+            self.receipt_service,
+            self,
+            hardware_service=self.hardware_service,
+        ).exec()
 
     def void_selected(self) -> None:
         invoice = self._current_invoice()
