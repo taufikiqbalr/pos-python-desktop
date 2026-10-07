@@ -31,7 +31,9 @@ from app.config import (
 from app.domain import Cart, Product
 from app.hardware import EscPosHardwareService, HardwareError
 from app.identity import TERMINAL_IDENTITY
+from app.integrations.clients import IntegrationError
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
+from app.pricing import PricingService
 from app.services import (
     AuthService,
     CatalogService,
@@ -70,6 +72,7 @@ class PosWindow(QMainWindow):
         cash_movement_service: CashMovementService,
         refund_service: RefundService,
         audit_service: AuditService,
+        pricing_service: PricingService,
         receipt_service: ReceiptService,
         hardware_service: EscPosHardwareService,
         sync_service: SyncService,
@@ -85,6 +88,7 @@ class PosWindow(QMainWindow):
         self.cash_movement_service = cash_movement_service
         self.refund_service = refund_service
         self.audit_service = audit_service
+        self.pricing_service = pricing_service
         self.receipt_service = receipt_service
         self.hardware_service = hardware_service
         self.sync_service = sync_service
@@ -196,12 +200,23 @@ class PosWindow(QMainWindow):
         self.customer_input = QLineEdit()
         self.customer_input.setPlaceholderText("Nama pelanggan (opsional)")
         member_button = QPushButton("Cari Anggota")
+        promo_button = QPushButton("Cek Promo")
+        promo_button.setEnabled(self.pricing_service.enabled)
         customer_row.addWidget(self.customer_input, 1)
         customer_row.addWidget(member_button)
+        customer_row.addWidget(promo_button)
         right_layout.addLayout(customer_row)
         self.member_label = QLabel("Pelanggan umum")
         self.member_label.setObjectName("Subtitle")
         right_layout.addWidget(self.member_label)
+        self.promo_label = QLabel(
+            "Promo belum dihitung"
+            if self.pricing_service.enabled
+            else "Pricing API belum dikonfigurasi"
+        )
+        self.promo_label.setObjectName("Subtitle")
+        self.promo_label.setWordWrap(True)
+        right_layout.addWidget(self.promo_label)
 
         discount_row = QHBoxLayout()
         discount_row.addWidget(QLabel("Diskon transaksi (%)"))
@@ -267,6 +282,7 @@ class PosWindow(QMainWindow):
         cash_button.clicked.connect(self.open_cash_movement)
         refund_button.clicked.connect(self.open_refund)
         member_button.clicked.connect(self.search_customer)
+        promo_button.clicked.connect(self.apply_pricing_quote)
         self.shift_button.clicked.connect(self.manage_shift)
         logout_button.clicked.connect(self.logout)
 
@@ -373,11 +389,60 @@ class PosWindow(QMainWindow):
             f"{self.selected_customer.get('membership_type') or 'MEMBER'}"
         )
 
+    def apply_pricing_quote(self) -> None:
+        if not self.pricing_service.enabled:
+            QMessageBox.information(
+                self,
+                "Pricing",
+                "Pricing API belum dikonfigurasi.",
+            )
+            return
+        if not self.cart.lines:
+            QMessageBox.information(
+                self,
+                "Pricing",
+                "Tambahkan barang sebelum menghitung promo.",
+            )
+            return
+
+        member_no = (
+            self.selected_customer.get("member_no")
+            if self.selected_customer
+            else None
+        )
+        try:
+            quote = self.pricing_service.quote(self.cart, member_no)
+            applied = self.pricing_service.apply_quote(self.cart, quote)
+        except (IntegrationError, ValueError) as exc:
+            QMessageBox.warning(self, "Pricing Gagal", str(exc))
+            return
+
+        self.discount_spin.blockSignals(True)
+        self.discount_spin.setValue(float(self.cart.cart_discount_percent))
+        self.discount_spin.blockSignals(False)
+        self.refresh_cart()
+
+        messages = [str(item) for item in applied.get("messages", []) if item]
+        quote_id = applied.get("quote_id")
+        parts = []
+        if quote_id:
+            parts.append(f"Quote: {quote_id}")
+        if applied["applied_lines"]:
+            parts.append(f"{len(applied['applied_lines'])} item mendapat promo")
+        if applied["cart_discount_percent"]:
+            parts.append(
+                f"diskon transaksi {applied['cart_discount_percent']:g}%"
+            )
+        parts.extend(messages)
+        self.promo_label.setText(" • ".join(parts) if parts else "Tidak ada promo aktif")
+
     def clear_customer(self) -> None:
         self.selected_customer = None
         self.customer_input.setReadOnly(False)
         self.customer_input.clear()
         self.member_label.setText("Pelanggan umum")
+        if self.pricing_service.enabled:
+            self.promo_label.setText("Promo belum dihitung")
 
     def open_cash_movement(self) -> None:
         self.refresh_shift_state()
