@@ -6,11 +6,13 @@ from app.config import (
     INTEGRATION_FALLBACK_LOCAL,
     INVENTORY_API_URL,
     MEMBERSHIP_API_URL,
+    PRICING_API_URL,
 )
 from app.database import Database
 from app.hardware import EscPosHardwareService
-from app.integrations.clients import InventoryApiClient, MembershipApiClient
+from app.integrations.clients import InventoryApiClient, MembershipApiClient, PricingApiClient
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
+from app.pricing import PricingService
 from app.services import AuthService, CatalogService, ReceiptService, SaleService, ShiftService
 from app.sync import SyncService
 from app.ui.login_window import LoginWindow
@@ -29,6 +31,7 @@ def main() -> int:
     membership_api = (
         MembershipApiClient(MEMBERSHIP_API_URL) if MEMBERSHIP_API_URL else None
     )
+    pricing_api = PricingApiClient(PRICING_API_URL) if PRICING_API_URL else None
 
     auth_service = AuthService(db)
     catalog_service = CatalogService(
@@ -46,6 +49,7 @@ def main() -> int:
     cash_movement_service = CashMovementService(db)
     refund_service = RefundService(db)
     audit_service = AuditService(db)
+    pricing_service = PricingService(pricing_api)
     receipt_service = ReceiptService()
     hardware_service = EscPosHardwareService()
     sync_service = SyncService(db)
@@ -59,6 +63,7 @@ def main() -> int:
         cash_movement_service=cash_movement_service,
         refund_service=refund_service,
         audit_service=audit_service,
+        pricing_service=pricing_service,
         receipt_service=receipt_service,
         hardware_service=hardware_service,
         sync_service=sync_service,
