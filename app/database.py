@@ -68,6 +68,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS shifts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     cashier_user_id INTEGER NOT NULL,
+                    store_id TEXT,
+                    register_id TEXT,
+                    device_id TEXT,
                     opening_cash INTEGER NOT NULL DEFAULT 0,
                     opened_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     closing_cash INTEGER,
@@ -86,6 +89,9 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     invoice_no TEXT NOT NULL UNIQUE,
                     cashier_user_id INTEGER NOT NULL,
+                    store_id TEXT,
+                    register_id TEXT,
+                    device_id TEXT,
                     shift_id INTEGER,
                     customer_id INTEGER,
                     customer_member_no TEXT,
@@ -158,6 +164,9 @@ class Database:
                     refund_no TEXT NOT NULL UNIQUE,
                     original_sale_id INTEGER NOT NULL,
                     cashier_user_id INTEGER NOT NULL,
+                    store_id TEXT,
+                    register_id TEXT,
+                    device_id TEXT,
                     shift_id INTEGER,
                     approved_by INTEGER NOT NULL,
                     refund_method TEXT NOT NULL,
@@ -194,6 +203,9 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     shift_id INTEGER NOT NULL,
                     cashier_user_id INTEGER NOT NULL,
+                    store_id TEXT,
+                    register_id TEXT,
+                    device_id TEXT,
                     approved_by INTEGER NOT NULL,
                     movement_type TEXT NOT NULL CHECK(movement_type IN ('IN', 'OUT')),
                     amount INTEGER NOT NULL CHECK(amount > 0),
@@ -222,10 +234,37 @@ class Database:
                     ON audit_events(created_at);
                 CREATE INDEX IF NOT EXISTS idx_audit_events_entity
                     ON audit_events(entity_type, entity_id);
+
+                CREATE TABLE IF NOT EXISTS integration_outbox (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT NOT NULL,
+                    aggregate_type TEXT NOT NULL,
+                    aggregate_id TEXT NOT NULL,
+                    store_id TEXT NOT NULL,
+                    register_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    sent_at TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_outbox_status
+                    ON integration_outbox(status, id);
+                CREATE INDEX IF NOT EXISTS idx_outbox_aggregate
+                    ON integration_outbox(aggregate_type, aggregate_id);
                 """
             )
             # Lightweight migrations for databases created by earlier MVP versions.
+            self._ensure_column(conn, "shifts", "store_id", "TEXT")
+            self._ensure_column(conn, "shifts", "register_id", "TEXT")
+            self._ensure_column(conn, "shifts", "device_id", "TEXT")
             self._ensure_column(conn, "sales", "shift_id", "INTEGER")
+            self._ensure_column(conn, "sales", "store_id", "TEXT")
+            self._ensure_column(conn, "sales", "register_id", "TEXT")
+            self._ensure_column(conn, "sales", "device_id", "TEXT")
             self._ensure_column(conn, "sales", "customer_id", "INTEGER")
             self._ensure_column(conn, "sales", "customer_member_no", "TEXT")
             self._ensure_column(conn, "sales", "status", "TEXT NOT NULL DEFAULT 'COMPLETED'")
@@ -234,6 +273,12 @@ class Database:
             self._ensure_column(conn, "sales", "voided_by", "INTEGER")
             self._ensure_column(conn, "held_sales", "customer_id", "INTEGER")
             self._ensure_column(conn, "held_sales", "customer_member_no", "TEXT")
+            self._ensure_column(conn, "refunds", "store_id", "TEXT")
+            self._ensure_column(conn, "refunds", "register_id", "TEXT")
+            self._ensure_column(conn, "refunds", "device_id", "TEXT")
+            self._ensure_column(conn, "cash_movements", "store_id", "TEXT")
+            self._ensure_column(conn, "cash_movements", "register_id", "TEXT")
+            self._ensure_column(conn, "cash_movements", "device_id", "TEXT")
             self._seed_users(conn)
             self._seed_products(conn)
             self._seed_customers(conn)
