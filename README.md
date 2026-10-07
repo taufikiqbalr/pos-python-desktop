@@ -272,14 +272,24 @@ Struktur kode:
 │       └── tests.yml
 ├── main.py
 ├── app/
+│   ├── audit.py
 │   ├── config.py
 │   ├── database.py
 │   ├── domain.py
+│   ├── hardware.py
+│   ├── identity.py
+│   ├── operations.py
+│   ├── pricing.py
 │   ├── security.py
 │   ├── services.py
+│   ├── sync.py
+│   ├── integrations/
+│   │   └── clients.py
 │   └── ui/
+│       ├── device_dialog.py
 │       ├── dialogs.py
 │       ├── login_window.py
+│       ├── operations_dialogs.py
 │       ├── pos_window.py
 │       └── styles.py
 ├── tests/
@@ -289,6 +299,13 @@ Struktur kode:
 ├── receipts/
 └── requirements.txt
 ```
+
+## Dokumentasi deployment
+
+- `docs/hardware-setup.md` — ESC/POS network/USB, cash drawer, dan multi-register identity.
+- `docs/windows-deployment.md` — build executable dan deployment Windows.
+- `docs/integration-contract.md` — Inventory, Membership, Pricing, dan event-sync API contract.
+- `.env.example` — seluruh konfigurasi environment yang dapat dipakai.
 
 ## Menjalankan aplikasi
 
