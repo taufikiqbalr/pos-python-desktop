@@ -7,6 +7,7 @@ from app.domain import Cart
 from app.hardware import EscPosHardwareService
 from app.identity import TERMINAL_IDENTITY
 from app.operations import CustomerService
+from app.pricing import PricingService
 from app.services import AuthService, CatalogService, SaleService, ShiftService
 from app.sync import SyncService
 
@@ -42,6 +43,22 @@ class FakeMembershipApi:
                 "active": True,
             }
         ]
+
+
+class FakePricingApi:
+    def quote(self, *, member_no, items, store_id):
+        return {
+            "quote_id": "Q-001",
+            "line_discounts": [
+                {
+                    "sku": items[0]["sku"],
+                    "discount_percent": 10,
+                    "reason": "Member promo",
+                }
+            ],
+            "cart_discount_percent": 5,
+            "messages": ["Promo anggota diterapkan"],
+        }
 
 
 class Phase3Tests(unittest.TestCase):
@@ -125,6 +142,21 @@ class Phase3Tests(unittest.TestCase):
         local_members = CustomerService(self.db)
         cached = local_members.search("API-0001")
         self.assertEqual(cached[0]["name"], "Anggota API")
+
+    def test_pricing_quote_applies_only_server_authorized_discount(self):
+        catalog = CatalogService(self.db)
+        product = catalog.get_by_barcode_or_sku("8997001000059")
+        cart = Cart()
+        cart.add_product(product, 2)
+
+        pricing = PricingService(FakePricingApi())
+        quote = pricing.quote(cart, "BRIN-0001")
+        result = pricing.apply_quote(cart, quote)
+
+        self.assertEqual(result["quote_id"], "Q-001")
+        self.assertEqual(float(cart.lines[0].discount_percent), 10.0)
+        self.assertEqual(float(cart.cart_discount_percent), 5.0)
+        self.assertLess(cart.grand_total, cart.subtotal)
 
     def test_default_hardware_mode_does_not_require_escpos_import(self):
         hardware = EscPosHardwareService()
