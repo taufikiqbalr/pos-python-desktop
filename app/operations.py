@@ -5,6 +5,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from app.audit import write_audit
 from app.database import Database
 from app.identity import TERMINAL_IDENTITY
+from app.integrations.clients import IntegrationError, MembershipApiClient
 from app.sync import enqueue_outbox
 
 
@@ -71,17 +72,65 @@ def _expected_drawer_cash(conn, shift_id: int) -> int:
 
 
 class CustomerService:
-    """Local development adapter for member/customer lookup.
+    """Remote-first member lookup with a durable local cache fallback."""
 
-    Replace this service with a koperasi membership API client later without
-    changing the cashier UI contract.
-    """
-
-    def __init__(self, db: Database) -> None:
+    def __init__(
+        self,
+        db: Database,
+        membership_api: MembershipApiClient | None = None,
+        fallback_local: bool = True,
+    ) -> None:
         self.db = db
+        self.membership_api = membership_api
+        self.fallback_local = fallback_local
+
+    def _cache_remote_member(self, data: dict) -> dict:
+        member_no = str(data.get("member_no") or "").strip()
+        name = str(data.get("name") or "").strip()
+        if not member_no or not name:
+            raise IntegrationError("Payload membership membutuhkan member_no dan name")
+
+        phone = str(data.get("phone") or "").strip() or None
+        email = str(data.get("email") or "").strip() or None
+        membership_type = str(data.get("membership_type") or "MEMBER").strip()
+        active = 1 if data.get("active", True) else 0
+
+        with self.db.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO customers(
+                    member_no, name, phone, email, membership_type, active
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(member_no) DO UPDATE SET
+                    name=excluded.name,
+                    phone=excluded.phone,
+                    email=excluded.email,
+                    membership_type=excluded.membership_type,
+                    active=excluded.active,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (member_no, name, phone, email, membership_type, active),
+            )
+            row = conn.execute(
+                """
+                SELECT id, member_no, name, phone, email, membership_type, active
+                FROM customers WHERE member_no=?
+                """,
+                (member_no,),
+            ).fetchone()
+        return dict(row)
 
     def search(self, term: str = "", limit: int = 100) -> list[dict]:
         term = term.strip()
+        if self.membership_api:
+            try:
+                remote_rows = self.membership_api.search_members(term, limit)
+                if remote_rows:
+                    return [self._cache_remote_member(row) for row in remote_rows]
+            except IntegrationError:
+                if not self.fallback_local:
+                    raise
+
         like = f"%{term}%"
         with self.db.connect() as conn:
             rows = conn.execute(
