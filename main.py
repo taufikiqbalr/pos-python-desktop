@@ -3,8 +3,10 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from app.database import Database
+from app.hardware import EscPosHardwareService
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import AuthService, CatalogService, ReceiptService, SaleService, ShiftService
+from app.sync import SyncService
 from app.ui.login_window import LoginWindow
 from app.ui.styles import APP_STYLESHEET
 
@@ -26,6 +28,8 @@ def main() -> int:
     refund_service = RefundService(db)
     audit_service = AuditService(db)
     receipt_service = ReceiptService()
+    hardware_service = EscPosHardwareService()
+    sync_service = SyncService(db)
 
     window = LoginWindow(
         auth_service=auth_service,
@@ -37,6 +41,8 @@ def main() -> int:
         refund_service=refund_service,
         audit_service=audit_service,
         receipt_service=receipt_service,
+        hardware_service=hardware_service,
+        sync_service=sync_service,
     )
     window.show()
     return app.exec()
