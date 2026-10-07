@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.hardware import EscPosHardwareService
 from app.operations import AuditService, CashMovementService, CustomerService, RefundService
 from app.services import (
     AuthService,
@@ -21,6 +22,7 @@ from app.services import (
     SaleService,
     ShiftService,
 )
+from app.sync import SyncService
 
 
 class LoginWindow(QMainWindow):
@@ -36,6 +38,8 @@ class LoginWindow(QMainWindow):
         refund_service: RefundService,
         audit_service: AuditService,
         receipt_service: ReceiptService,
+        hardware_service: EscPosHardwareService,
+        sync_service: SyncService,
     ) -> None:
         super().__init__()
         self.auth_service = auth_service
@@ -47,6 +51,8 @@ class LoginWindow(QMainWindow):
         self.refund_service = refund_service
         self.audit_service = audit_service
         self.receipt_service = receipt_service
+        self.hardware_service = hardware_service
+        self.sync_service = sync_service
         self.pos_window = None
 
         self.setWindowTitle("Login - Koperasi BRIN POS")
@@ -133,6 +139,8 @@ class LoginWindow(QMainWindow):
             refund_service=self.refund_service,
             audit_service=self.audit_service,
             receipt_service=self.receipt_service,
+            hardware_service=self.hardware_service,
+            sync_service=self.sync_service,
             on_logout=self.show_after_logout,
         )
         self.pos_window.show()
